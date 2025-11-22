@@ -1,0 +1,135 @@
+.welcome-screen {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100%;
+  text-align: center;
+  color: var(--gray-500);
+}
+
+.welcome-content {
+  max-width: 600px;
+}
+
+.welcome-icon {
+  font-size: 60px;
+  color: var(--gray-700);
+  margin-bottom: 20px;
+  font-family: 'Material Symbols Outlined';
+}
+
+.title-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.title-selector {
+  position: relative;
+  display: inline-block;
+}
+
+.title-selector select {
+  font-size: 28px;
+  font-weight: bold;
+  color: var(--gray-300);
+  background-color: transparent;
+  border: none;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 30px;
+  /* Space for the icon */
+  cursor: pointer;
+  text-transform: capitalize;
+}
+
+.title-selector .icon {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  font-size: 30px;
+  color: var(--gray-300);
+  pointer-events: none;
+  /* Allows clicks to pass through to the select */
+}
+
+.welcome-content p {
+  font-size: 18px;
+  margin-bottom: 30px;
+}
+
+.welcome-content .sidebar-section {
+  margin-bottom: 30px;
+  text-align: left;
+  background-color: var(--Neutral-15);
+  padding: 20px;
+  border-radius: 12px;
+}
+
+.welcome-content .sidebar-section-title {
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--gray-200);
+  margin-bottom: 15px;
+  text-transform: none;
+  letter-spacing: 0;
+  text-align: center;
+}
+
+.welcome-content .tools-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+}
+
+.welcome-content .tool-item {
+  background-color: var(--Neutral-10);
+  border: 1px solid var(--Neutral-20);
+  cursor: pointer;
+}
+
+.welcome-content .tool-item:hover {
+  background-color: var(--Neutral-20);
+}
+
+.example-prompts {
+  display: flex;
+  justify-content: center;
+  gap: 15px;
+}
+
+.prompt {
+  background-color: var(--Neutral-15);
+  padding: 10px 15px;
+  border-radius: 8px;
+  font-family: 'Roboto Mono', monospace;
+  font-size: 14px;
+  color: var(--gray-200);
+}
+
+.custom-topics-input {
+  width: 100%;
+  margin-top: 15px;
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid var(--Neutral-20);
+  background-color: var(--Neutral-10);
+  color: var(--text);
+  font-family: 'Google Sans Display', sans-serif;
+  font-size: 14px;
+  resize: vertical;
+}
+
+.custom-topics-input::placeholder {
+  color: var(--gray-500);
+}
+
+.custom-topics-input:focus {
+  outline: none;
+  border-color: var(--accent-blue-active);
+  box-shadow: 0 0 0 2px var(--accent-blue-active-bg);
+}

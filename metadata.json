@@ -1,0 +1,7 @@
+{
+  "name": "English tutor of reading",
+  "description": "An interactive English tutor for Gemini's native audio and function calling.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
