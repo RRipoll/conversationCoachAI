@@ -1,3 +1,4 @@
+
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -496,6 +497,48 @@ Text to analyze: "${turn.text}"`;
   };
 
   // Practice Mode Handlers
+  const handleRandomTopic = async () => {
+    if (!ai) return;
+    try {
+      const javaSubTopics = [
+        "Java 21 features",
+        "Spring Boot 3",
+        "Java concurrency patterns",
+        "Java Garbage Collection tuning",
+        "Microservices with Java",
+        "Java Stream API",
+        "Java Records and Pattern Matching",
+        "Java Security best practices",
+        "Unit Testing with JUnit 5",
+        "Cloud Native Java",
+        "Java Virtual Threads (Project Loom)",
+        "Java Memory Management",
+        "Reactive Programming in Java",
+        "Java Design Patterns",
+        "Hibernate and JPA",
+        "GraalVM and Native Image"
+      ];
+      const randomTopic = javaSubTopics[Math.floor(Math.random() * javaSubTopics.length)];
+      
+      setTargetText(`Searching for a topic related to ${randomTopic}...`);
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: `Search for interesting or trending topics specifically related to "${randomTopic}". Randomly select one specific concept, tool, or feature from the search results. Write a cohesive, educational paragraph of 100 to 200 words explaining this specific topic. The text should be suitable for reading practice. Do not use bullet points or markdown formatting.`,
+        config: {
+          tools: [{ googleSearch: {} }],
+        },
+      });
+      if (response.text) {
+        setTargetText(response.text.trim());
+      } else {
+        setTargetText("");
+      }
+    } catch (error) {
+      console.error("Failed to fetch random topic:", error);
+      setTargetText("Error fetching topic. Please try again.");
+    }
+  };
+
   const handleGetIPA = async () => {
     if (!ai || !targetText) return;
     try {
@@ -595,10 +638,18 @@ Text to analyze: "${turn.text}"`;
             placeholder="Enter English text to practice pronunciation..."
             value={targetText}
             onChange={(e) => setTargetText(e.target.value)}
-            rows={2}
+            rows={5}
           />
         </div>
         <div className="practice-controls">
+          <button
+            className="practice-button"
+            onClick={handleRandomTopic}
+            title="Get a random programming topic"
+           >
+             <span className="icon">shuffle</span> Topic
+           </button>
+
            <button 
             className="practice-button" 
             onClick={handleGetIPA}
