@@ -3,7 +3,7 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
 */
-import { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import PopUp from '../popup/PopUp';
 import WelcomeScreen from '../welcome-screen/WelcomeScreen';
 // FIX: Import LiveServerContent to correctly type the content handler.
@@ -77,8 +77,17 @@ export default function StreamingConsole() {
   const [targetIpa, setTargetIpa] = useState("");
   const [isPracticePlaying, setIsPracticePlaying] = useState(false);
   const [manualTopic, setManualTopic] = useState("");
+  const [practiceError, setPracticeError] = useState<string | null>(null);
   const targetTextRef = useRef(targetText);
   const practiceSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  
+  // Word Selection Tooltip State
+  const [selectedWordTooltip, setSelectedWordTooltip] = useState<{
+    word: string;
+    ipa: string | null;
+    x: number;
+    y: number;
+  } | null>(null);
   
   // Refs for TTS Pause/Resume
   const practiceAudioBufferRef = useRef<AudioBuffer | null>(null);
@@ -117,6 +126,34 @@ export default function StreamingConsole() {
 
   const handleClosePopUp = () => {
     setShowPopUp(false);
+  };
+
+  const isQuotaError = (e: any) => {
+    return (
+      e.message?.includes('429') || 
+      e.message?.includes('RESOURCE_EXHAUSTED') || 
+      e.status === 'RESOURCE_EXHAUSTED' ||
+      (e.error && (e.error.code === 429 || e.error.status === 'RESOURCE_EXHAUSTED'))
+    );
+  };
+
+  const handleOpError = (e: any) => {
+    // Check for common rate limit / quota errors
+    const isQuota = isQuotaError(e);
+
+    if (isQuota) {
+      console.warn("Quota limit reached:", e);
+    } else {
+      console.error("Operation error:", e);
+    }
+
+    let msg = "An error occurred. Please try again.";
+    if (isQuota) {
+      msg = "Quota limit reached. Please wait a moment before trying again.";
+    }
+    setPracticeError(msg);
+    // Auto-clear after 5 seconds
+    setTimeout(() => setPracticeError(null), 5000);
   };
 
   // Set the configuration for the Live API
@@ -520,6 +557,7 @@ Text to analyze: "${turn.text}"`;
   // Practice Mode Handlers
   const handleGenerateTopic = async () => {
     if (!ai) return;
+    setPracticeError(null);
     try {
       let searchTopic = manualTopic.trim();
       
@@ -559,13 +597,14 @@ Text to analyze: "${turn.text}"`;
         setTargetText("");
       }
     } catch (error) {
-      console.error("Failed to generate topic:", error);
       setTargetText("Error fetching topic. Please try again.");
+      handleOpError(error);
     }
   };
 
   const handleGetIPA = async () => {
     if (!ai || !targetText) return;
+    setPracticeError(null);
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
@@ -573,7 +612,7 @@ Text to analyze: "${turn.text}"`;
       });
       setTargetIpa(response.text.trim());
     } catch (e) {
-      console.error("Error fetching IPA", e);
+      handleOpError(e);
     }
   };
 
@@ -587,6 +626,7 @@ Text to analyze: "${turn.text}"`;
 
   const handlePracticeTTS = async () => {
     if (!ai || !targetText.trim()) return;
+    setPracticeError(null);
 
     // Initialize AudioContext if needed
     if (!audioContextRef.current) {
@@ -641,8 +681,8 @@ Text to analyze: "${turn.text}"`;
           return;
         }
       } catch (e) {
-        console.error("TTS failed", e);
         setIsPracticePlaying(false);
+        handleOpError(e);
         return;
       }
     }
@@ -678,6 +718,8 @@ Text to analyze: "${turn.text}"`;
   const handleClearPractice = () => {
     setTargetText("");
     setTargetIpa("");
+    setPracticeError(null);
+    setSelectedWordTooltip(null);
     if (practiceSourceRef.current) {
       try {
         isPausedIntentRef.current = false;
@@ -694,6 +736,81 @@ Text to analyze: "${turn.text}"`;
       disconnect();
     }
   };
+
+  const handleTextareaMouseDown = () => {
+    setSelectedWordTooltip(null);
+  };
+
+  const handleTextareaMouseUp = async (e: React.MouseEvent<HTMLTextAreaElement>) => {
+    const textarea = e.currentTarget;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const text = textarea.value.substring(start, end).trim();
+
+    if (!text || !ai) return;
+
+    // Calculate position: e.clientX, e.clientY are mouse coordinates
+    const { clientX, clientY } = e;
+
+    setSelectedWordTooltip({
+      word: text,
+      ipa: null,
+      x: clientX,
+      y: clientY
+    });
+
+    // 1. Play TTS
+    try {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+      }
+      const audioCtx = audioContextRef.current;
+      if (audioCtx.state === 'suspended') {
+        await audioCtx.resume();
+      }
+
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash-preview-tts",
+        contents: [{ parts: [{ text: text }] }],
+        config: {
+          responseModalities: [Modality.AUDIO],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: voice },
+            },
+          },
+        },
+      });
+      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+      if (base64Audio) {
+        const audioData = base64ToArrayBuffer(base64Audio);
+        const audioBuffer = await decodeAudioData(audioData, audioCtx, 24000, 1);
+        const source = audioCtx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioCtx.destination);
+        source.start();
+      }
+    } catch (e) {
+      console.error("Selection TTS error", e);
+    }
+
+    // 2. Fetch IPA
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: `Provide the International Phonetic Alphabet (IPA) transcription for the following English text. Return only the IPA string, without any surrounding text, labels, or markdown formatting. Text: "${text}"`,
+      });
+      const ipa = response.text.trim();
+      setSelectedWordTooltip(prev => (prev && prev.word === text ? { ...prev, ipa } : prev));
+    } catch (e: any) {
+      const isQuota = isQuotaError(e);
+      console.error("Selection IPA error", e);
+      
+      const errMsg = isQuota ? 'Quota exceeded' : 'Error';
+      setSelectedWordTooltip(prev => (prev && prev.word === text ? { ...prev, ipa: errMsg } : prev));
+    }
+  };
+
 
   // Send context when connecting in practice mode
   useEffect(() => {
@@ -730,6 +847,8 @@ Text to analyze: "${turn.text}"`;
             placeholder="Enter English text to practice pronunciation..."
             value={targetText}
             onChange={(e) => setTargetText(e.target.value)}
+            onMouseUp={handleTextareaMouseUp}
+            onMouseDown={handleTextareaMouseDown}
             rows={5}
           />
         </div>
@@ -771,6 +890,13 @@ Text to analyze: "${turn.text}"`;
             <span className="icon">delete</span> Clear
           </button>
         </div>
+        
+        {practiceError && (
+          <div className="practice-error">
+            <span className="icon">error</span> {practiceError}
+          </div>
+        )}
+
         {targetIpa && (
           <div className="practice-ipa-display">
             <span className="ipa-label">IPA:</span> {targetIpa}
@@ -874,6 +1000,19 @@ Text to analyze: "${turn.text}"`;
               )}
             </div>
           ))}
+        </div>
+      )}
+      
+      {selectedWordTooltip && (
+        <div 
+          className="selection-tooltip"
+          style={{ 
+              left: selectedWordTooltip.x, 
+              top: selectedWordTooltip.y - 10 
+          }}
+        >
+          <div className="tooltip-word">{selectedWordTooltip.word}</div>
+          <div className="tooltip-ipa">{selectedWordTooltip.ipa || '...'}</div>
         </div>
       )}
     </div>
