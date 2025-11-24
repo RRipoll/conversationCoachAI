@@ -76,11 +76,32 @@ export default function StreamingConsole() {
   const [targetText, setTargetText] = useState("");
   const [targetIpa, setTargetIpa] = useState("");
   const [isPracticePlaying, setIsPracticePlaying] = useState(false);
+  const [manualTopic, setManualTopic] = useState("");
   const targetTextRef = useRef(targetText);
   const practiceSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  
+  // Refs for TTS Pause/Resume
+  const practiceAudioBufferRef = useRef<AudioBuffer | null>(null);
+  const practiceStartTimeRef = useRef<number>(0);
+  const practicePausedAtRef = useRef<number>(0);
+  const isPausedIntentRef = useRef<boolean>(false);
 
   useEffect(() => {
     targetTextRef.current = targetText;
+    // Reset audio buffer and state if text changes
+    if (practiceAudioBufferRef.current) {
+      if (isPracticePlaying && practiceSourceRef.current) {
+        isPausedIntentRef.current = false; // Treat as full stop
+        try {
+          practiceSourceRef.current.stop();
+        } catch (e) {
+          // ignore
+        }
+      }
+      practiceAudioBufferRef.current = null;
+      practicePausedAtRef.current = 0;
+      setIsPracticePlaying(false);
+    }
   }, [targetText]);
 
 
@@ -497,33 +518,37 @@ Text to analyze: "${turn.text}"`;
   };
 
   // Practice Mode Handlers
-  const handleRandomTopic = async () => {
+  const handleGenerateTopic = async () => {
     if (!ai) return;
     try {
-      const javaSubTopics = [
-        "Java 21 features",
-        "Spring Boot 3",
-        "Java concurrency patterns",
-        "Java Garbage Collection tuning",
-        "Microservices with Java",
-        "Java Stream API",
-        "Java Records and Pattern Matching",
-        "Java Security best practices",
-        "Unit Testing with JUnit 5",
-        "Cloud Native Java",
-        "Java Virtual Threads (Project Loom)",
-        "Java Memory Management",
-        "Reactive Programming in Java",
-        "Java Design Patterns",
-        "Hibernate and JPA",
-        "GraalVM and Native Image"
-      ];
-      const randomTopic = javaSubTopics[Math.floor(Math.random() * javaSubTopics.length)];
+      let searchTopic = manualTopic.trim();
       
-      setTargetText(`Searching for a topic related to ${randomTopic}...`);
+      if (!searchTopic) {
+        const javaSubTopics = [
+          "Java 21 features",
+          "Spring Boot 3",
+          "Java concurrency patterns",
+          "Java Garbage Collection tuning",
+          "Microservices with Java",
+          "Java Stream API",
+          "Java Records and Pattern Matching",
+          "Java Security best practices",
+          "Unit Testing with JUnit 5",
+          "Cloud Native Java",
+          "Java Virtual Threads (Project Loom)",
+          "Java Memory Management",
+          "Reactive Programming in Java",
+          "Java Design Patterns",
+          "Hibernate and JPA",
+          "GraalVM and Native Image"
+        ];
+        searchTopic = javaSubTopics[Math.floor(Math.random() * javaSubTopics.length)];
+      }
+
+      setTargetText(`Searching for a topic related to "${searchTopic}"...`);
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: `Search for interesting or trending topics specifically related to "${randomTopic}". Randomly select one specific concept, tool, or feature from the search results. Write a cohesive, educational paragraph of 100 to 200 words explaining this specific topic. The text should be suitable for reading practice. Do not use bullet points or markdown formatting.`,
+        contents: `Search for interesting or trending topics specifically related to "${searchTopic}". Randomly select one specific concept, tool, or feature from the search results. Write a cohesive, educational paragraph of 100 to 200 words explaining this specific topic. The text should be suitable for reading practice. Do not use bullet points or markdown formatting.`,
         config: {
           tools: [{ googleSearch: {} }],
         },
@@ -534,7 +559,7 @@ Text to analyze: "${turn.text}"`;
         setTargetText("");
       }
     } catch (error) {
-      console.error("Failed to fetch random topic:", error);
+      console.error("Failed to generate topic:", error);
       setTargetText("Error fetching topic. Please try again.");
     }
   };
@@ -561,44 +586,92 @@ Text to analyze: "${turn.text}"`;
   };
 
   const handlePracticeTTS = async () => {
-    if (!ai || !targetText.trim() || isPracticePlaying) return;
+    if (!ai || !targetText.trim()) return;
+
+    // Initialize AudioContext if needed
+    if (!audioContextRef.current) {
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+    }
+    const audioCtx = audioContextRef.current;
+    if (audioCtx.state === 'suspended') {
+      await audioCtx.resume();
+    }
+
+    // --- PAUSE LOGIC ---
+    if (isPracticePlaying) {
+      if (practiceSourceRef.current) {
+        isPausedIntentRef.current = true;
+        practiceSourceRef.current.stop();
+        // Calculate elapsed time to store for resume
+        const elapsed = audioCtx.currentTime - practiceStartTimeRef.current;
+        practicePausedAtRef.current += elapsed;
+      }
+      setIsPracticePlaying(false);
+      return;
+    }
+
+    // --- PLAY/RESUME LOGIC ---
     setIsPracticePlaying(true);
-    try {
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash-preview-tts",
-        contents: [{ parts: [{ text: targetText }] }],
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: voice },
+    isPausedIntentRef.current = false;
+
+    // If buffer is missing (first run or text changed)
+    if (!practiceAudioBufferRef.current) {
+      practicePausedAtRef.current = 0; // Ensure start from 0
+      try {
+        const response = await ai.models.generateContent({
+          model: "gemini-2.5-flash-preview-tts",
+          contents: [{ parts: [{ text: targetText }] }],
+          config: {
+            responseModalities: [Modality.AUDIO],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: voice },
+              },
             },
           },
-        },
-      });
-      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (base64Audio) {
-        if (!audioContextRef.current) {
-          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-        }
-        const audioCtx = audioContextRef.current;
-        const audioData = base64ToArrayBuffer(base64Audio);
-        const audioBuffer = await decodeAudioData(audioData, audioCtx, 24000, 1);
-        const source = audioCtx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(audioCtx.destination);
-        source.start();
-        practiceSourceRef.current = source;
-        source.onended = () => {
+        });
+        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (base64Audio) {
+          const audioData = base64ToArrayBuffer(base64Audio);
+          const audioBuffer = await decodeAudioData(audioData, audioCtx, 24000, 1);
+          practiceAudioBufferRef.current = audioBuffer;
+        } else {
+          console.error("No audio data returned");
           setIsPracticePlaying(false);
-          practiceSourceRef.current = null;
-        };
-      } else {
+          return;
+        }
+      } catch (e) {
+        console.error("TTS failed", e);
         setIsPracticePlaying(false);
+        return;
       }
-    } catch (error) {
-      console.error("Practice TTS failed:", error);
-      setIsPracticePlaying(false);
+    }
+
+    // Play the buffer
+    if (practiceAudioBufferRef.current) {
+      const source = audioCtx.createBufferSource();
+      source.buffer = practiceAudioBufferRef.current;
+      source.connect(audioCtx.destination);
+
+      // If we are at the end (or slightly over due to float math), restart
+      if (practicePausedAtRef.current >= practiceAudioBufferRef.current.duration) {
+        practicePausedAtRef.current = 0;
+      }
+
+      source.start(0, practicePausedAtRef.current);
+      practiceStartTimeRef.current = audioCtx.currentTime;
+      practiceSourceRef.current = source;
+
+      source.onended = () => {
+        if (isPausedIntentRef.current) {
+          // Paused manually: state handled in the pause block above.
+        } else {
+          // Ended naturally
+          setIsPracticePlaying(false);
+          practicePausedAtRef.current = 0; // Reset so next click is from start
+        }
+        practiceSourceRef.current = null;
+      };
     }
   };
 
@@ -607,6 +680,7 @@ Text to analyze: "${turn.text}"`;
     setTargetIpa("");
     if (practiceSourceRef.current) {
       try {
+        isPausedIntentRef.current = false;
         practiceSourceRef.current.stop();
       } catch (e) {
         // ignore errors if already stopped
@@ -614,6 +688,8 @@ Text to analyze: "${turn.text}"`;
       practiceSourceRef.current = null;
     }
     setIsPracticePlaying(false);
+    practiceAudioBufferRef.current = null;
+    practicePausedAtRef.current = 0;
     if (connected) {
       disconnect();
     }
@@ -632,6 +708,22 @@ Text to analyze: "${turn.text}"`;
       
       {/* Practice Panel */}
       <div className="practice-panel">
+        <div className="practice-header">
+           <input 
+              type="text" 
+              className="topic-input"
+              placeholder="Enter a topic (e.g., 'React Hooks') or leave empty for random Java topic"
+              value={manualTopic}
+              onChange={(e) => setManualTopic(e.target.value)}
+           />
+           <button
+              className="practice-button"
+              onClick={handleGenerateTopic}
+              title="Search and generate text for the topic"
+           >
+              <span className="icon">search</span> Generate
+           </button>
+        </div>
         <div className="practice-input-container">
           <textarea
             className="practice-textarea"
@@ -642,14 +734,6 @@ Text to analyze: "${turn.text}"`;
           />
         </div>
         <div className="practice-controls">
-          <button
-            className="practice-button"
-            onClick={handleRandomTopic}
-            title="Get a random programming topic"
-           >
-             <span className="icon">shuffle</span> Topic
-           </button>
-
            <button 
             className="practice-button" 
             onClick={handleGetIPA}
@@ -661,11 +745,11 @@ Text to analyze: "${turn.text}"`;
           <button 
             className="practice-button" 
             onClick={handlePracticeTTS}
-            disabled={!targetText.trim() || isPracticePlaying}
-            title="Listen to pronunciation"
+            disabled={!targetText.trim()}
+            title={isPracticePlaying ? "Pause" : "Listen to pronunciation"}
           >
-            <span className="icon">{isPracticePlaying ? 'hourglass_top' : 'volume_up'}</span> 
-            Listen
+            <span className="icon">{isPracticePlaying ? 'pause' : 'volume_up'}</span> 
+            {isPracticePlaying ? 'Pause' : 'Listen'}
           </button>
           
           <button 

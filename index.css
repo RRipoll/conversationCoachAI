@@ -1,3 +1,4 @@
+
 body {
   margin: 0;
   font-family:
@@ -708,6 +709,30 @@ header .export-button {
   z-index: 10;
   box-shadow: 0 4px 10px rgba(0,0,0,0.2);
 }
+
+.practice-header {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 10px;
+  align-items: center;
+}
+
+.topic-input {
+  flex-grow: 1;
+  background-color: var(--Neutral-5);
+  border: 1px solid var(--Neutral-20);
+  border-radius: 8px;
+  padding: 10px;
+  color: white;
+  font-size: 1rem;
+  font-family: 'Google Sans', sans-serif;
+}
+
+.topic-input:focus {
+  border-color: var(--accent-blue-active);
+  box-shadow: 0 0 0 1px var(--accent-blue-active);
+}
+
 
 .practice-input-container {
   width: 100%;
