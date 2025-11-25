@@ -4,11 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
 */
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
-import PopUp from '../popup/PopUp';
-import WelcomeScreen from '../welcome-screen/WelcomeScreen';
 import cn from 'classnames';
 
-// FIX: Import LiveServerContent to correctly type the content handler.
 import {
   GoogleGenAI,
   LiveServerContent,
@@ -22,11 +19,13 @@ import {
   useSettings,
   useLogStore,
   usePrompts,
-  ConversationTurn,
   PronunciationFeedback,
-  GrammarFeedback,
 } from '@/lib/state';
 import { base64ToArrayBuffer, decodeAudioData } from '@/lib/utils';
+import { AudioRecorder } from '@/lib/audio-recorder';
+import ControlTray from '../../console/control-tray/ControlTray';
+import PronunciationGuide from '../PronunciationGuide';
+import WelcomeScreen from '../welcome-screen/WelcomeScreen';
 
 const formatTimestamp = (date: Date) => {
   const pad = (num: number, size = 2) => num.toString().padStart(size, '0');
@@ -62,19 +61,53 @@ const renderContent = (text: string) => {
   });
 };
 
+// --- WAV Helper Functions ---
+const writeString = (view: DataView, offset: number, string: string) => {
+    for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+    }
+};
+
+const createWavHeader = (sampleRate: number, dataLength: number, numChannels: number = 1, bitDepth: number = 16) => {
+    const buffer = new ArrayBuffer(44);
+    const view = new DataView(buffer);
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + dataLength, true);
+    writeString(view, 8, 'WAVE');
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * numChannels * (bitDepth / 8), true);
+    view.setUint16(32, numChannels * (bitDepth / 8), true);
+    view.setUint16(34, bitDepth, true);
+    writeString(view, 36, 'data');
+    view.setUint32(40, dataLength, true);
+    return buffer;
+};
+
+const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
+    let binary = '';
+    const bytes = new Uint8Array(buffer);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+    }
+    return window.btoa(binary);
+};
+// ----------------------------
 
 export default function StreamingConsole() {
-  const { client, setConfig, connected, connect, disconnect } = useLiveAPIContext();
+  const { client, setConfig, connected, disconnect } = useLiveAPIContext();
   const { systemPrompt, voice } = useSettings();
   const { topics, customTopics } = usePrompts();
   const turns = useLogStore(state => state.turns);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [showPopUp, setShowPopUp] = useState(true);
-  const [ai, setAi] = useState<GoogleGenAI | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const [playingTurnId, setPlayingTurnId] = useState<string | null>(null);
-  const fetchingFeedbackRef = useRef(new Set<string>());
   
+  const [ai, setAi] = useState<GoogleGenAI | null>(null);
+  const [activeTab, setActiveTab] = useState<'reading' | 'conversation'>('reading');
+
   // Practice Mode State
   const [targetText, setTargetText] = useState("");
   const [isPracticePlaying, setIsPracticePlaying] = useState(false);
@@ -82,9 +115,16 @@ export default function StreamingConsole() {
   const [practiceError, setPracticeError] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isCaching, setIsCaching] = useState(false);
+  const [showGuide, setShowGuide] = useState(false); // State for Pronunciation Guide
   const targetTextRef = useRef(targetText);
   const practiceSourceRef = useRef<AudioBufferSourceNode | null>(null);
   
+  // Practice Recorder State
+  const [isPracticeRecording, setIsPracticeRecording] = useState(false);
+  const [practiceRecorder] = useState(() => new AudioRecorder());
+  const practiceAudioChunks = useRef<string[]>([]);
+  const [practiceFeedback, setPracticeFeedback] = useState<PronunciationFeedback | null>(null);
+
   // IPA Cache: Stores word -> { ipa, translation }
   const ipaCacheRef = useRef<Map<string, { ipa: string; translation: string }>>(new Map());
   
@@ -96,6 +136,13 @@ export default function StreamingConsole() {
     x: number;
     y: number;
   } | null>(null);
+
+  // Conversation Feedback Tooltip State
+  const [feedbackTooltip, setFeedbackTooltip] = useState<{
+    x: number;
+    y: number;
+    data: any;
+  } | null>(null);
   
   // Refs for TTS Pause/Resume
   const practiceAudioBufferRef = useRef<AudioBuffer | null>(null);
@@ -105,6 +152,8 @@ export default function StreamingConsole() {
 
   useEffect(() => {
     targetTextRef.current = targetText;
+    setPracticeFeedback(null); // Clear feedback when text changes
+    
     // Reset audio buffer and state if text changes
     if (practiceAudioBufferRef.current) {
       if (isPracticePlaying && practiceSourceRef.current) {
@@ -131,22 +180,22 @@ export default function StreamingConsole() {
     }
   }, []);
 
-
-  const handleClosePopUp = () => {
-    setShowPopUp(false);
-  };
-
   const isQuotaError = (e: any) => {
     if (!e) return false;
     // If e is a string, check content
     if (typeof e === 'string') {
         return e.includes('429') || e.includes('RESOURCE_EXHAUSTED');
     }
+    // Check various properties that might contain the error info
     return (
       e.message?.includes('429') || 
       e.message?.includes('RESOURCE_EXHAUSTED') || 
       e.status === 'RESOURCE_EXHAUSTED' ||
-      (e.error && (e.error.code === 429 || e.error.status === 'RESOURCE_EXHAUSTED'))
+      (e.error && (
+          e.error.code === 429 || 
+          e.error.status === 'RESOURCE_EXHAUSTED' ||
+          e.error.message?.includes('RESOURCE_EXHAUSTED')
+      ))
     );
   };
 
@@ -216,95 +265,40 @@ export default function StreamingConsole() {
   }, [setConfig, systemPrompt, topics, voice, customTopics]);
 
   useEffect(() => {
-    const { addTurn, updateLastTurn, updateTurnById } = useLogStore.getState();
+    const { addTurn, updateLastTurn } = useLogStore.getState();
 
     const handleInputTranscription = (text: string, isFinal: boolean) => {
-      const turns = useLogStore.getState().turns;
-      const last = turns[turns.length - 1];
-      if (last && last.role === 'user' && !last.isFinal) {
-        updateLastTurn({
-          text: last.text + text,
-          isFinal,
-        });
-      } else {
-        addTurn({ role: 'user', text, isFinal });
-      }
-    };
-
-    const handleOutputTranscription = (text: string, isFinal: boolean) => {
-      const { turns, addTurn, updateLastTurn, updateTurnById } =
-        useLogStore.getState();
-      const last = turns[turns.length - 1];
-      if (last && last.role === 'agent' && !last.isFinal) {
-        updateLastTurn({
-          text: last.text + text,
-          isFinal,
-        });
-      } else {
-        // A new agent turn is starting. Finalize the previous user turn if it exists.
+        const turns = useLogStore.getState().turns;
+        const last = turns[turns.length - 1];
         if (last && last.role === 'user' && !last.isFinal) {
-          updateTurnById(last.id, { isFinal: true });
+          updateLastTurn({
+            text: last.text + text,
+            isFinal,
+          });
+        } else {
+          addTurn({ role: 'user', text, isFinal });
         }
-        addTurn({ role: 'agent', text, isFinal });
-      }
-    };
-
-    // FIX: The 'content' event provides a single LiveServerContent object.
-    // The function signature is updated to accept one argument, and groundingMetadata is extracted from it.
-    const handleContent = (serverContent: LiveServerContent) => {
-      const text =
-        serverContent.modelTurn?.parts
-          ?.map((p: any) => p.text)
-          .filter(Boolean)
-          .join(' ') ?? '';
-      const groundingChunks = serverContent.groundingMetadata?.groundingChunks;
-
-      if (!text && !groundingChunks) return;
-
-      const { turns, addTurn, updateLastTurn, updateTurnById } =
-        useLogStore.getState();
-      // FIX: Replace .at(-1) with [length - 1] for broader TS compatibility.
-      const last = turns[turns.length - 1];
-
-      if (last?.role === 'agent' && !last.isFinal) {
-        const updatedTurn: Partial<ConversationTurn> = {
-          text: last.text + text,
-        };
-        if (groundingChunks) {
-          updatedTurn.groundingChunks = [
-            ...(last.groundingChunks || []),
-            ...groundingChunks,
-          ];
+      };
+  
+      const handleOutputTranscription = (text: string, isFinal: boolean) => {
+        const turns = useLogStore.getState().turns;
+        const last = turns[turns.length - 1];
+        if (last && last.role === 'agent' && !last.isFinal) {
+          updateLastTurn({
+            text: last.text + text,
+            isFinal,
+          });
+        } else {
+          addTurn({ role: 'agent', text, isFinal });
         }
-        updateLastTurn(updatedTurn);
-      } else {
-        // A new agent turn is starting. Finalize the previous user turn if it exists.
-        if (last && last.role === 'user' && !last.isFinal) {
-          updateTurnById(last.id, { isFinal: true });
-        }
-        addTurn({ role: 'agent', text, isFinal: false, groundingChunks });
-      }
-    };
-
-    const handleTurnComplete = async () => {
-      const { turns, updateTurnById } = useLogStore.getState();
-      // FIX: Replace .at(-1) with [length - 1] for broader TS compatibility.
-      const last = turns[turns.length - 1];
-      if (last && !last.isFinal) {
-        updateTurnById(last.id, { isFinal: true });
-      }
-    };
+      };
 
     client.on('inputTranscription', handleInputTranscription);
     client.on('outputTranscription', handleOutputTranscription);
-    client.on('content', handleContent);
-    client.on('turncomplete', handleTurnComplete);
 
     return () => {
       client.off('inputTranscription', handleInputTranscription);
       client.off('outputTranscription', handleOutputTranscription);
-      client.off('content', handleContent);
-      client.off('turncomplete', handleTurnComplete);
     };
   }, [client]);
 
@@ -314,316 +308,24 @@ export default function StreamingConsole() {
     }
   }, [turns]);
 
-  // Fetch pronunciation feedback for finalized user turns
-  useEffect(() => {
-    if (!ai) return;
+  // --- Practice Mode Handlers ---
 
-    const getPronunciationFeedback = async (turn: ConversationTurn) => {
-      if (fetchingFeedbackRef.current.has(turn.id)) return;
-      fetchingFeedbackRef.current.add(turn.id);
-      const { updateTurnById } = useLogStore.getState();
-
-      try {
-        // Set a loading state
-        updateTurnById(turn.id, {
-          pronunciationFeedback: {
-            overall_assessment: 'Analyzing pronunciation...',
-            words: [],
-          },
-        });
-
-        const responseSchema = {
-          type: Type.OBJECT,
-          properties: {
-            overall_assessment: {
-              type: Type.STRING,
-              description:
-                "A brief, encouraging overall assessment of the user's pronunciation.",
-            },
-            words: {
-              type: Type.ARRAY,
-              description:
-                "A word-by-word analysis of the user's pronunciation.",
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  word: {
-                    type: Type.STRING,
-                    description: 'The word from the original text.',
-                  },
-                  accuracy: {
-                    type: Type.STRING,
-                    description:
-                      'Pronunciation accuracy: "good", "needs_improvement", or "incorrect".',
-                  },
-                  feedback: {
-                    type: Type.STRING,
-                    description:
-                      'Specific feedback for this word. If "good", this can be a simple encouragement.',
-                  },
-                  phonetic_spoken: {
-                    type: Type.STRING,
-                    description: 'IPA transcription of how the user pronounced the word.',
-                  },
-                  phonetic_target: {
-                    type: Type.STRING,
-                    description: 'Correct IPA transcription of the word.',
-                  },
-                  tongue_placement: {
-                    type: Type.STRING,
-                    description: 'Specific advice on tongue placement or mouth shape to correct the pronunciation.',
-                  },
-                },
-                required: ['word', 'accuracy', 'feedback', 'phonetic_spoken', 'phonetic_target', 'tongue_placement'],
-              },
-            },
-          },
-          required: ['overall_assessment', 'words'],
-        };
-
-        const target = targetTextRef.current;
-        let prompt = '';
-
-        if (target && target.trim().length > 0) {
-          prompt = `You are an expert English pronunciation coach. The user attempted to read the following target text: "${target}". The transcription of what they actually said is: "${turn.text}". 
-          
-          Analyze their pronunciation by comparing the transcript to the target text. 
-          - If the transcript matches the target closely, mark words as "good".
-          - If words are missing or different in a way that suggests mispronunciation, mark them as "needs_improvement" or "incorrect".
-          - Provide an overall assessment and a word-by-word breakdown of the TARGET text.
-          - For each word, provide the IPA transcription of how it likely sounded (phonetic_spoken) and how it should sound (phonetic_target).
-          - If the word was mispronounced, provide specific instructions on tongue placement or mouth shape (tongue_placement) to correct it.
-          - Respond ONLY with a JSON object that conforms to the provided schema.`;
-        } else {
-          prompt = `You are an expert English pronunciation coach. Analyze the pronunciation of the following text from a non-native English speaker. 
-          - Provide an overall assessment and a word-by-word breakdown of every word.
-          - For each word, provide the IPA transcription of how it likely sounded (phonetic_spoken) and how it should sound (phonetic_target).
-          - Provide specific instructions on tongue placement or mouth shape (tongue_placement) to improve pronunciation.
-          - Respond ONLY with a JSON object that conforms to the provided schema.
-
-Text to analyze: "${turn.text}"`;
-        }
-
-        const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: prompt,
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema,
-          },
-        });
-
-        const feedbackJson = JSON.parse(response.text) as PronunciationFeedback;
-        updateTurnById(turn.id, { pronunciationFeedback: feedbackJson });
-      } catch (error) {
-        console.error('Pronunciation feedback generation failed:', error);
-        updateTurnById(turn.id, { pronunciationFeedback: undefined });
-      } finally {
-        fetchingFeedbackRef.current.delete(turn.id);
-      }
-    };
-
-    const lastFinalizedUserTurn = turns
-      .slice()
-      .reverse()
-      .find(
-        t =>
-          t.role === 'user' &&
-          t.isFinal &&
-          t.text.trim() &&
-          !t.pronunciationFeedback,
-      );
-
-    if (lastFinalizedUserTurn) {
-      getPronunciationFeedback(lastFinalizedUserTurn);
-    }
-  }, [turns, ai]);
-
-
-  const handlePlayTTS = async (turn: ConversationTurn) => {
-    if (!ai || playingTurnId) return;
-    setPlayingTurnId(turn.id);
-    const { updateTurnById } = useLogStore.getState();
-
-    try {
-      // Fetch IPA if it doesn't exist for the current turn
-      if (!turn.ipa && turn.text.trim()) {
-        const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: `Provide the International Phonetic Alphabet (IPA) transcription for the following English text. Return only the IPA string, without any surrounding text, labels, or markdown formatting. For example, for "hello world", return "/həˈloʊ wɜːrld/". Text: "${turn.text}"`,
-        });
-        const ipa = response.text.trim();
-        if (ipa) {
-          updateTurnById(turn.id, { ipa });
-        }
-      }
-
-      // Fetch grammar feedback if it doesn't exist for the current user turn
-      if (turn.role === 'user' && !turn.grammarFeedback && turn.text.trim()) {
-        updateTurnById(turn.id, {
-          grammarFeedback: {
-            overall_assessment: 'Analyzing grammar...',
-            corrections: [],
-          },
-        });
-
-        const responseSchema = {
-          type: Type.OBJECT,
-          properties: {
-            overall_assessment: {
-              type: Type.STRING,
-              description: "A brief, encouraging overall assessment of the user's grammar.",
-            },
-            corrections: {
-              type: Type.ARRAY,
-              description: "A list of specific grammar corrections. If there are no errors, this should be an empty array.",
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  original: {
-                    type: Type.STRING,
-                    description: 'The original phrase with the grammatical error.',
-                  },
-                  corrected: {
-                    type: Type.STRING,
-                    description: 'The grammatically correct version of the phrase.',
-                  },
-                  explanation: {
-                    type: Type.STRING,
-                    description: 'A simple explanation of the grammar rule that was broken.',
-                  },
-                },
-                required: ['original', 'corrected', 'explanation'],
-              },
-            },
-          },
-          required: ['overall_assessment', 'corrections'],
-        };
-
-        const prompt = `You are an expert English grammar coach. Analyze the grammar of the following text from a non-native English speaker. Provide an overall assessment and a list of corrections. If the text is grammatically perfect, provide a positive assessment and an empty array for corrections. Respond ONLY with a JSON object that conforms to the provided schema.
-
-Text to analyze: "${turn.text}"`;
-
-        try {
-          const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: prompt,
-            config: {
-              responseMimeType: 'application/json',
-              responseSchema,
-            },
-          });
-          const feedbackJson = JSON.parse(response.text) as GrammarFeedback;
-          updateTurnById(turn.id, { grammarFeedback: feedbackJson });
-        } catch (error) {
-          console.error('Grammar feedback generation failed:', error);
-          updateTurnById(turn.id, { grammarFeedback: undefined });
-        }
-      }
-
-
-      // Generate and play TTS audio
-      const ttsVoice = turn.role === 'user' ? 'Puck' : voice;
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash-preview-tts",
-        contents: [{ parts: [{ text: turn.text }] }],
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: ttsVoice },
-            },
-          },
-        },
-      });
-      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (base64Audio) {
-        if (!audioContextRef.current) {
-          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-        }
-        const audioCtx = audioContextRef.current;
-        const audioData = base64ToArrayBuffer(base64Audio);
-        const audioBuffer = await decodeAudioData(audioData, audioCtx, 24000, 1);
-        const source = audioCtx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(audioCtx.destination);
-        source.start();
-        source.onended = () => setPlayingTurnId(null);
-      } else {
-        setPlayingTurnId(null);
-      }
-    } catch (error) {
-      console.error("TTS/IPA/Grammar generation failed:", error);
-      updateTurnById(turn.id, { ipa: undefined, grammarFeedback: undefined });
-      setPlayingTurnId(null);
-    }
-  };
-
-  const renderFeedbackText = (turn: ConversationTurn) => {
-    if (
-      !turn.pronunciationFeedback?.words ||
-      turn.pronunciationFeedback.words.length === 0
-    ) {
-      return renderContent(turn.text);
-    }
-
-    return (
-      <>
-        {turn.pronunciationFeedback.words.map((wordInfo, index) => {
-          const details = [];
-          if (wordInfo.feedback) details.push(wordInfo.feedback);
-          if (wordInfo.phonetic_spoken && wordInfo.phonetic_target) {
-             details.push(`Heard: /${wordInfo.phonetic_spoken}/ vs Target: /${wordInfo.phonetic_target}/`);
-          }
-          if (wordInfo.tongue_placement) {
-             details.push(`Tip: ${wordInfo.tongue_placement}`);
-          }
-          const feedbackString = details.join('\n\n');
-          
-          return (
-            <span
-              key={index}
-              className={`word-feedback accuracy-${wordInfo.accuracy.replace(
-                /_/g,
-                '-',
-              )}`}
-              data-feedback={feedbackString}
-            >
-              {wordInfo.word}{' '}
-            </span>
-          );
-        })}
-      </>
-    );
-  };
-
-  // Practice Mode Handlers
   const handleGenerateTopic = async () => {
-    if (!ai || isGenerating) return;
-    setPracticeError(null);
+    if (!ai) return;
     setIsGenerating(true);
+    setPracticeError(null);
+    setTargetText(""); 
+
     try {
-      let searchTopic = manualTopic.trim();
-      
-      if (!searchTopic) {
-        const javaSubTopics = [
-          "Java 21 features",
-          "Spring Boot 3",
-          "Java concurrency patterns",
-          "Java Garbage Collection tuning",
-          "Microservices with Java",
-          "Java Stream API",
-          "Java Records and Pattern Matching",
-          "Java Security best practices",
-          "Unit Testing with JUnit 5",
-          "Cloud Native Java",
-          "Java Virtual Threads (Project Loom)",
-          "Java Memory Management",
-          "Reactive Programming in Java",
-          "Java Design Patterns",
-          "Hibernate and JPA",
-          "GraalVM and Native Image",
-          "Object-Oriented Programming (OOP)",
+      let prompt = "";
+      if (manualTopic.trim()) {
+         prompt = `Generate a cohesive, educational paragraph of 100 to 200 words specifically about "${manualTopic.trim()}". The text should be suitable for reading practice. Do not use bullet points or markdown formatting.`;
+      } else {
+         const javaSubTopics = [
+            "Java Concurrency", "Java Streams API", "Java Collections Framework", 
+            "Java Virtual Machine (JVM) Architecture", "Spring Boot Basics", 
+            "Java Garbage Collection", "Java Generics", "Java Multithreading",
+            "Java Annotations", "Java Reflection API","Object-Oriented Programming (OOP)",
 "Classes and Objects",
 "Inheritance",
 "Polymorphism",
@@ -747,534 +449,667 @@ Text to analyze: "${turn.text}"`;
 "Blockchain Integration",
 "Smart Contracts Integration",
 "Web3 Libraries"
-        ];
-        searchTopic = javaSubTopics[Math.floor(Math.random() * javaSubTopics.length)];
+         ];
+         const randomSubTopic = javaSubTopics[Math.floor(Math.random() * javaSubTopics.length)];
+         prompt = `Search for recent trending topics in Java programming, specifically focusing on "${randomSubTopic}". Randomly select one specific aspect. Write a cohesive, educational paragraph of 100 to 200 words explaining this topic. The text should be suitable for reading practice. Do not use bullet points or markdown formatting.`;
       }
 
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: `Search for interesting or trending topics specifically related to "${searchTopic}". Randomly select one specific concept, tool, or feature from the search results. Write a cohesive, educational paragraph of 100 to 200 words explaining this specific topic. The text should be suitable for reading practice. Do not use bullet points or markdown formatting.`,
+        contents: [{
+            role: 'user',
+            parts: [{ text: prompt }]
+        }],
         config: {
-          tools: [{ googleSearch: {} }],
-        },
+           tools: [{googleSearch: {}}]
+        }
       });
-      if (response.text) {
-        setTargetText(response.text.trim());
+
+      const text = response.text;
+      if (text) {
+        setTargetText(text);
       }
-    } catch (error) {
-      handleOpError(error);
+    } catch (e) {
+      handleOpError(e);
     } finally {
       setIsGenerating(false);
     }
   };
 
-  const fetchIPA = useCallback(async (text: string, isManual: boolean = false) => {
-    if (!ai || !text.trim()) return;
-    if (isManual) setPracticeError(null);
-    setIsCaching(true);
+  const handlePracticeTTS = async () => {
+    if (!ai || !targetText) return;
+    setPracticeError(null);
+
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({sampleRate: 24000});
+
+    // 1. Pause Logic
+    if (isPracticePlaying && practiceSourceRef.current) {
+        // We are playing, so we pause.
+        isPausedIntentRef.current = true;
+        practicePausedAtRef.current += audioContext.currentTime - practiceStartTimeRef.current;
+        practiceSourceRef.current.stop();
+        practiceSourceRef.current = null;
+        setIsPracticePlaying(false);
+        return;
+    }
+
+    // 2. Resume or Start Logic
+    setIsPracticePlaying(true);
 
     try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: `Provide the IPA transcription and Spanish translation for the text: "${text}". Return a JSON object with properties: "full_ipa" (string) containing the complete transcription, and "words" (array) containing objects with "word", "ipa", and "spanish_translation" properties for each word.`,
-        config: {
-          responseMimeType: 'application/json',
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              full_ipa: { type: Type.STRING },
-              words: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    word: { type: Type.STRING },
-                    ipa: { type: Type.STRING },
-                    spanish_translation: { type: Type.STRING }
-                  }
-                }
-              }
-            },
-            required: ["full_ipa", "words"]
-          }
-        },
-      });
-      
-      let jsonText = response.text;
-      // Basic cleanup to remove markdown code blocks if present
-      if (jsonText.startsWith('```')) {
-         jsonText = jsonText.replace(/^```(json)?\n?/, '').replace(/\n?```$/, '');
-      }
+        let bufferToPlay = practiceAudioBufferRef.current;
 
-      const data = JSON.parse(jsonText);
-      
-      if (data.words) {
-        data.words.forEach((item: any) => {
-          if (item.word && item.ipa) {
-            const cleanWord = item.word.toLowerCase().replace(/[^\w']/g, "");
-            ipaCacheRef.current.set(cleanWord, { ipa: item.ipa, translation: item.spanish_translation || '' });
-          }
-        });
-      }
+        // If no buffer cached, fetch it
+        if (!bufferToPlay) {
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash-preview-tts',
+                contents: [{ parts: [{ text: targetText }] }],
+                config: {
+                    responseModalities: [Modality.AUDIO],
+                    speechConfig: {
+                        voiceConfig: {
+                            prebuiltVoiceConfig: { voiceName: 'Kore' },
+                        },
+                    },
+                },
+            });
 
-    } catch (e: any) {
-      // Background task failed, log warning only.
-      // We do not want to setPracticeError for background cache failures, especially syntax errors from truncated JSON.
-      console.warn("Background IPA cache fetch failed:", e);
-      if (isManual) {
-         handleOpError(e);
-      }
-    } finally {
-      setIsCaching(false);
-    }
-  }, [ai]);
+            const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+            if (!base64Audio) throw new Error("No audio generated");
 
-  const debouncedFetchIPA = useMemo(
-    () => debounce((text: string) => fetchIPA(text, false), 1000),
-    [fetchIPA]
-  );
+            bufferToPlay = await decodeAudioData(
+                base64ToArrayBuffer(base64Audio),
+                audioContext,
+                24000,
+                1
+            );
+            practiceAudioBufferRef.current = bufferToPlay;
+        }
 
-  useEffect(() => {
-    if (targetText.trim() && !targetText.startsWith("Searching")) {
-      debouncedFetchIPA(targetText);
-    } else {
-      ipaCacheRef.current.clear();
-      debouncedFetchIPA.cancel();
-    }
-    return () => {
-      debouncedFetchIPA.cancel();
-    };
-  }, [targetText, debouncedFetchIPA]);
+        // Play the buffer
+        const source = audioContext.createBufferSource();
+        source.buffer = bufferToPlay;
+        source.connect(audioContext.destination);
+        
+        // Handle cleanup on end
+        source.onended = () => {
+             // Only reset if we finished naturally, not if we paused intentionally
+             if (!isPausedIntentRef.current) {
+                setIsPracticePlaying(false);
+                practicePausedAtRef.current = 0; // Reset progress
+                // Keep buffer for replay
+             }
+        };
+        practiceSourceRef.current = source;
+        
+        // Start from paused position or 0
+        const startOffset = practicePausedAtRef.current % bufferToPlay.duration;
+        practiceStartTimeRef.current = audioContext.currentTime - startOffset;
+        
+        source.start(0, startOffset);
+        isPausedIntentRef.current = false; // Reset intent
 
-
-  const handlePracticeMic = async () => {
-    if (connected) {
-      disconnect();
-    } else {
-      await connect();
+    } catch (e) {
+        handleOpError(e);
+        setIsPracticePlaying(false);
     }
   };
 
-  const handlePracticeTTS = async () => {
-    if (!ai || !targetText.trim()) return;
-    setPracticeError(null);
-
-    // Initialize AudioContext if needed
-    if (!audioContextRef.current) {
-      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-    }
-    const audioCtx = audioContextRef.current;
-    if (audioCtx.state === 'suspended') {
-      await audioCtx.resume();
-    }
-
-    // --- PAUSE LOGIC ---
-    if (isPracticePlaying) {
-      if (practiceSourceRef.current) {
-        isPausedIntentRef.current = true;
-        practiceSourceRef.current.stop();
-        // Calculate elapsed time to store for resume
-        const elapsed = audioCtx.currentTime - practiceStartTimeRef.current;
-        practicePausedAtRef.current += elapsed;
+  const analyzePronunciation = async () => {
+      if (!ai || !targetText || practiceAudioChunks.current.length === 0) return;
+      
+      // 1. Reconstruct raw PCM from base64 chunks
+      const allChunks = practiceAudioChunks.current.map(chunk => base64ToArrayBuffer(chunk));
+      const totalLength = allChunks.reduce((acc, chunk) => acc + chunk.byteLength, 0);
+      const pcmBuffer = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of allChunks) {
+          pcmBuffer.set(new Uint8Array(chunk), offset);
+          offset += chunk.byteLength;
       }
-      setIsPracticePlaying(false);
-      return;
-    }
+      
+      // 2. Add WAV Header
+      // AudioRecorder defaults to 16000Hz, 1 channel
+      const sampleRate = 16000;
+      const wavHeader = createWavHeader(sampleRate, totalLength);
+      const wavFile = new Uint8Array(wavHeader.byteLength + totalLength);
+      wavFile.set(new Uint8Array(wavHeader), 0);
+      wavFile.set(pcmBuffer, wavHeader.byteLength);
 
-    // --- PLAY/RESUME LOGIC ---
-    setIsPracticePlaying(true);
-    isPausedIntentRef.current = false;
+      // 3. Convert back to Base64
+      const fullBase64 = arrayBufferToBase64(wavFile.buffer);
 
-    // If buffer is missing (first run or text changed)
-    if (!practiceAudioBufferRef.current) {
-      practicePausedAtRef.current = 0; // Ensure start from 0
       try {
-        const response = await ai.models.generateContent({
-          model: "gemini-2.5-flash-preview-tts",
-          contents: [{ parts: [{ text: targetText }] }],
-          config: {
-            responseModalities: [Modality.AUDIO],
-            speechConfig: {
-              voiceConfig: {
-                prebuiltVoiceConfig: { voiceName: voice },
-              },
-            },
-          },
-        });
-        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (base64Audio) {
-          const audioData = base64ToArrayBuffer(base64Audio);
-          const audioBuffer = await decodeAudioData(audioData, audioCtx, 24000, 1);
-          practiceAudioBufferRef.current = audioBuffer;
-        } else {
-          console.error("No audio data returned");
-          setIsPracticePlaying(false);
-          return;
-        }
+          const prompt = `
+          The user is practicing reading the following text: "${targetText}".
+          Analyze the user's pronunciation from the audio.
+          For any mispronounced words (marked as "needs_improvement" or "incorrect"), you MUST provide specific advice on articulation in the 'tongue_placement' field.
+          Explain clearly how to position the tongue, lips, and jaw to produce the correct sound.
+
+          Provide a JSON response with the following structure:
+          {
+            "overall_assessment": "string",
+            "words": [
+                {
+                    "word": "string",
+                    "accuracy": "good" | "needs_improvement" | "incorrect",
+                    "feedback": "string",
+                    "phonetic_spoken": "string (IPA of what the user said)",
+                    "phonetic_target": "string (IPA of correct pronunciation)",
+                    "tongue_placement": "string (Specific advice on tongue position, lip shape, and jaw movement)"
+                }
+            ]
+          }
+          `;
+          
+          const response = await ai.models.generateContent({
+             model: 'gemini-2.5-flash',
+             contents: [
+                 {
+                     parts: [
+                         { text: prompt },
+                         { inlineData: { mimeType: 'audio/wav', data: fullBase64 } }
+                     ]
+                 }
+             ],
+             config: {
+                 responseMimeType: 'application/json',
+             }
+          });
+          
+          if (response.text) {
+              const feedback = JSON.parse(response.text) as PronunciationFeedback;
+              setPracticeFeedback(feedback);
+          }
+
       } catch (e) {
-        setIsPracticePlaying(false);
-        handleOpError(e);
-        return;
+          handleOpError(e);
       }
-    }
+  };
 
-    // Play the buffer
-    if (practiceAudioBufferRef.current) {
-      const source = audioCtx.createBufferSource();
-      source.buffer = practiceAudioBufferRef.current;
-      source.connect(audioCtx.destination);
-
-      // If we are at the end (or slightly over due to float math), restart
-      if (practicePausedAtRef.current >= practiceAudioBufferRef.current.duration) {
-        practicePausedAtRef.current = 0;
+  const handlePracticeMicToggle = async () => {
+      if (isPracticeRecording) {
+          // Stop
+          practiceRecorder.stop();
+          practiceRecorder.off('data');
+          setIsPracticeRecording(false);
+          
+          // Analyze
+          await analyzePronunciation();
+      } else {
+          // Start
+          setPracticeFeedback(null);
+          practiceAudioChunks.current = [];
+          const onData = (base64: string) => {
+              practiceAudioChunks.current.push(base64);
+          };
+          practiceRecorder.on('data', onData);
+          await practiceRecorder.start();
+          setIsPracticeRecording(true);
       }
-
-      source.start(0, practicePausedAtRef.current);
-      practiceStartTimeRef.current = audioCtx.currentTime;
-      practiceSourceRef.current = source;
-
-      source.onended = () => {
-        if (isPausedIntentRef.current) {
-          // Paused manually: state handled in the pause block above.
-        } else {
-          // Ended naturally
-          setIsPracticePlaying(false);
-          practicePausedAtRef.current = 0; // Reset so next click is from start
-        }
-        practiceSourceRef.current = null;
-      };
-    }
   };
 
   const handleClearPractice = () => {
     setTargetText("");
+    setManualTopic("");
+    setPracticeFeedback(null);
     setPracticeError(null);
-    setSelectedWordTooltip(null);
+    
+    // Stop Playback
     if (practiceSourceRef.current) {
-      try {
-        isPausedIntentRef.current = false;
-        practiceSourceRef.current.stop();
-      } catch (e) {
-        // ignore errors if already stopped
-      }
-      practiceSourceRef.current = null;
+        try {
+            practiceSourceRef.current.stop();
+        } catch(e) {}
+        practiceSourceRef.current = null;
     }
-    setIsPracticePlaying(false);
     practiceAudioBufferRef.current = null;
+    setIsPracticePlaying(false);
+    isPausedIntentRef.current = false;
     practicePausedAtRef.current = 0;
-    ipaCacheRef.current.clear();
-    if (connected) {
-      disconnect();
+
+    // Stop Recording
+    if (isPracticeRecording) {
+        practiceRecorder.stop();
+        practiceRecorder.off('data');
+        setIsPracticeRecording(false);
     }
   };
 
-  const handleTextareaMouseDown = () => {
-    setSelectedWordTooltip(null);
+  // --- IPA Caching & Tooltip ---
+  
+  const fetchIPA = async (text: string) => {
+      if (!ai || !text) return;
+      setIsCaching(true);
+      
+      try {
+          // Filter out words already in cache to save tokens
+          const words = text.split(/\s+/).map(w => w.replace(/[^\w']/g, "").toLowerCase()).filter(w => w.length > 0);
+          const uniqueWords = [...new Set(words)];
+          const wordsToFetch = uniqueWords.filter(w => !ipaCacheRef.current.has(w));
+          
+          if (wordsToFetch.length === 0) {
+              setIsCaching(false);
+              return;
+          }
+
+          // Chunk requests if too many words (simple check)
+          const chunk = wordsToFetch.slice(0, 50); // limit to 50 words per request
+
+          const prompt = `
+            Return a JSON object where keys are the English words from the list below and values are objects containing the 'ipa' (International Phonetic Alphabet) pronunciation and 'spanish_translation'.
+            Words: ${chunk.join(', ')}
+            Example format:
+            {
+              "hello": { "ipa": "/həˈləʊ/", "spanish_translation": "hola" }
+            }
+          `;
+
+          const response = await ai.models.generateContent({
+              model: 'gemini-2.5-flash',
+              contents: [{ parts: [{ text: prompt }] }],
+              config: { responseMimeType: 'application/json' }
+          });
+          
+          if (response.text) {
+              // Basic cleanup of markdown code blocks if present (defensive)
+              let cleanJson = response.text.trim();
+              if (cleanJson.startsWith('```json')) {
+                cleanJson = cleanJson.replace(/^`{3}json\n|`{3}$/g, '');
+              } else if (cleanJson.startsWith('```')) {
+                 cleanJson = cleanJson.replace(/^`{3}\n|`{3}$/g, '');
+              }
+
+              try {
+                  const mapData = JSON.parse(cleanJson);
+                  Object.entries(mapData).forEach(([word, data]: [string, any]) => {
+                      ipaCacheRef.current.set(word.toLowerCase(), {
+                          ipa: data.ipa || "",
+                          translation: data.spanish_translation || ""
+                      });
+                  });
+              } catch (parseErr) {
+                 if (parseErr instanceof SyntaxError) {
+                    console.warn("Truncated JSON response in background fetch, skipping chunk.");
+                 } else {
+                    console.warn("JSON parse error in background fetch:", parseErr);
+                 }
+              }
+          }
+      } catch (e) {
+         // Background fetch failed, just log warning to avoid disrupting UI
+         console.warn("Background IPA fetch failed:", e);
+      } finally {
+         setIsCaching(false);
+      }
   };
+
+  // Debounce the IPA fetch
+  const debouncedFetchIPA = useMemo(
+      () => debounce((text: string) => fetchIPA(text), 1000),
+      [ai] // Re-create if AI client changes
+  );
+
+  useEffect(() => {
+      if (targetText && ai) {
+          debouncedFetchIPA(targetText);
+      }
+      return () => {
+          debouncedFetchIPA.cancel();
+      };
+  }, [targetText, ai, debouncedFetchIPA]);
+
 
   const handleTextareaMouseUp = async (e: React.MouseEvent<HTMLTextAreaElement>) => {
     const textarea = e.currentTarget;
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
-    const text = textarea.value.substring(start, end).trim();
-
-    if (!text || !ai) return;
-
-    // Calculate position: e.clientX, e.clientY are mouse coordinates
-    const { clientX, clientY } = e;
-
-    // Check cache first
-    const cleanWord = text.toLowerCase().replace(/[^\w']/g, "");
-    let cachedData = null;
-    if (ipaCacheRef.current.has(cleanWord)) {
-       cachedData = ipaCacheRef.current.get(cleanWord);
-    }
-
-    setSelectedWordTooltip({
-      word: text,
-      ipa: cachedData?.ipa || null,
-      translation: cachedData?.translation || null,
-      x: clientX,
-      y: clientY
-    });
-
-    // 1. Play TTS
-    try {
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-      }
-      const audioCtx = audioContextRef.current;
-      if (audioCtx.state === 'suspended') {
-        await audioCtx.resume();
-      }
-
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash-preview-tts",
-        contents: [{ parts: [{ text: text }] }],
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: voice },
-            },
-          },
-        },
-      });
-      const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (base64Audio) {
-        const audioData = base64ToArrayBuffer(base64Audio);
-        const audioBuffer = await decodeAudioData(audioData, audioCtx, 24000, 1);
-        const source = audioCtx.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(audioCtx.destination);
-        source.start();
-      }
-    } catch (e) {
-      if (isQuotaError(e)) {
-        console.warn("Selection TTS: Quota exceeded");
-      } else {
-        console.error("Selection TTS error", e);
-      }
-    }
-
-    // 2. Fetch IPA/Translation if not cached
-    if (!cachedData) {
-      try {
-        const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: `Provide the IPA transcription and Spanish translation for the text: "${text}". Return a JSON object with properties: "ipa" and "spanish_translation".`,
-          config: {
-            responseMimeType: 'application/json',
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                ipa: { type: Type.STRING },
-                spanish_translation: { type: Type.STRING }
-              },
-              required: ['ipa', 'spanish_translation']
-            }
-          },
-        });
-        const data = JSON.parse(response.text);
+    
+    if (start !== end) {
+        const text = textarea.value;
+        const selectedText = text.substring(start, end).trim();
         
-        setSelectedWordTooltip(prev => (prev && prev.word === text ? { ...prev, ipa: data.ipa, translation: data.spanish_translation } : prev));
-        // Cache it
-        ipaCacheRef.current.set(cleanWord, { ipa: data.ipa, translation: data.spanish_translation });
-        
-      } catch (e: any) {
-         const isQuota = isQuotaError(e);
-         if (isQuota) {
-            console.warn("Selection IPA/Translation: Quota exceeded");
-         } else {
-            console.error("Selection IPA/Translation error", e);
-         }
-         
-         const errMsg = isQuota ? 'Quota exceeded' : 'Error';
-         setSelectedWordTooltip(prev => (prev && prev.word === text ? { ...prev, ipa: errMsg, translation: null } : prev));
-      }
+        // Simple heuristic: single word only
+        if (selectedText && !selectedText.includes(' ')) {
+            const word = selectedText.toLowerCase().replace(/[^\w']/g, "");
+            
+            // 1. Position Tooltip
+            // Calculate approximate coordinates based on selection is hard in textarea.
+            // Simplified: show near mouse pointer
+            const x = e.clientX;
+            const y = e.clientY;
+
+            // 2. Check Cache
+            let data = ipaCacheRef.current.get(word);
+            
+            setSelectedWordTooltip({
+               word: selectedText,
+               ipa: data?.ipa || "Loading...",
+               translation: data?.translation || "Loading...",
+               x,
+               y
+            });
+
+            // 3. Play Audio
+             const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({sampleRate: 24000});
+             
+             try {
+                // If not cached, we might need to fetch manually for immediate feedback
+                // but usually the background fetch catches it.
+                // If "Loading...", we can trigger a targeted fetch.
+                if (!data) {
+                    const prompt = `
+                      Return a JSON object for the word "${word}":
+                      { "${word}": { "ipa": "...", "spanish_translation": "..." } }
+                    `;
+                    const response = await ai?.models.generateContent({
+                         model: 'gemini-2.5-flash',
+                         contents: [{ parts: [{ text: prompt }] }],
+                         config: { responseMimeType: 'application/json' }
+                    });
+                    if (response?.text) {
+                         const clean = response.text.replace(/```json|```/g, '').trim();
+                         const json = JSON.parse(clean);
+                         if (json[word]) {
+                             data = { ipa: json[word].ipa, translation: json[word].spanish_translation };
+                             ipaCacheRef.current.set(word, data);
+                             setSelectedWordTooltip(prev => prev && prev.word === selectedText ? { ...prev, ipa: data!.ipa, translation: data!.translation } : prev);
+                         }
+                    }
+                }
+             
+                const response = await ai?.models.generateContent({
+                    model: 'gemini-2.5-flash-preview-tts',
+                    contents: [{ parts: [{ text: selectedText }] }],
+                    config: {
+                        responseModalities: [Modality.AUDIO],
+                        speechConfig: {
+                            voiceConfig: {
+                                prebuiltVoiceConfig: { voiceName: 'Kore' },
+                            },
+                        },
+                    },
+                });
+
+                const base64Audio = response?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+                if (base64Audio) {
+                    const buffer = await decodeAudioData(
+                        base64ToArrayBuffer(base64Audio),
+                        audioContext,
+                        24000,
+                        1
+                    );
+                    const source = audioContext.createBufferSource();
+                    source.buffer = buffer;
+                    source.connect(audioContext.destination);
+                    source.start();
+                }
+
+             } catch (e: any) {
+                 if (isQuotaError(e)) {
+                     setSelectedWordTooltip(prev => prev ? { ...prev, ipa: "Quota exceeded", translation: "Quota exceeded" } : null);
+                 } else {
+                    console.error("Selection TTS/IPA error", e);
+                    setSelectedWordTooltip(prev => prev ? { ...prev, ipa: "Error", translation: "Error" } : null);
+                 }
+             }
+        }
     }
   };
+  
+  const handleTextareaMouseDown = () => {
+      setSelectedWordTooltip(null);
+  };
+  
+  const renderFeedbackText = (text: string, words: any[]) => {
+      // Create a map for fast lookup
+      const feedbackMap = new Map(words.map(w => [w.word.toLowerCase(), w]));
+      
+      return text.split(/\s+/).map((word, index) => {
+          const cleanWord = word.replace(/[^\w']/g, "").toLowerCase();
+          const info = feedbackMap.get(cleanWord);
+          
+          if (info) {
+              const className = `word-feedback accuracy-${info.accuracy}`;
+              return (
+                  <span 
+                    key={index} 
+                    className={className}
+                    onMouseEnter={(e) => handleFeedbackEnter(e, info)}
+                    onMouseLeave={handleFeedbackLeave}
+                  >
+                      {word}{' '}
+                  </span>
+              );
+          }
+          return <span key={index}>{word} </span>;
+      });
+  };
 
+  const handleFeedbackEnter = (e: React.MouseEvent, data: any) => {
+      setFeedbackTooltip({
+          x: e.clientX,
+          y: e.clientY,
+          data: data
+      });
+  };
 
-  // Send context when connecting in practice mode
-  useEffect(() => {
-    if (connected && client && targetTextRef.current) {
-      client.send([{ text: `I am practicing reading the following text: "${targetTextRef.current}". Please listen to my pronunciation and provide feedback.` }]);
-    }
-  }, [connected, client]);
+  const handleFeedbackLeave = () => {
+      setFeedbackTooltip(null);
+  };
+
+  const handleTabChange = (tab: 'reading' | 'conversation') => {
+      if (tab !== 'conversation' && connected) {
+          disconnect();
+      }
+      setActiveTab(tab);
+  };
 
   return (
-    <div className="transcription-container">
-      {showPopUp && <PopUp onClose={handleClosePopUp} />}
+    <div className="streaming-console">
+      <main>
+          <div className="tab-navigation">
+              <button 
+                className={cn("tab-btn", { active: activeTab === 'reading' })}
+                onClick={() => handleTabChange('reading')}
+              >
+                  Reading Text
+              </button>
+              <button 
+                className={cn("tab-btn", { active: activeTab === 'conversation' })}
+                onClick={() => handleTabChange('conversation')}
+              >
+                  Select a conversation category
+              </button>
+          </div>
 
+      <div className="main-app-area">
+      {activeTab === 'reading' && (
       <div className="practice-panel">
-        <div className="practice-header">
-           <input 
+         <div className="practice-header">
+            <input 
+              className="topic-input" 
               type="text" 
-              className="topic-input"
-              placeholder="Enter a topic (e.g., 'React Hooks') or leave empty for random Java topic"
+              placeholder="Enter a topic (e.g., 'Java streams') or leave empty for random"
               value={manualTopic}
               onChange={(e) => setManualTopic(e.target.value)}
-           />
-           <button
-              className="practice-button"
-              onClick={handleGenerateTopic}
-              disabled={isGenerating}
-              title="Search and generate text for the topic"
-           >
-              <span className="icon">{isGenerating ? 'hourglass_top' : 'search'}</span> 
-              {isGenerating ? 'Generating...' : 'Generate'}
-           </button>
-        </div>
-        <div className="practice-input-container">
-          <textarea
-            className="practice-textarea"
-            placeholder="Enter English text to practice pronunciation..."
-            value={targetText}
-            onChange={(e) => setTargetText(e.target.value)}
-            onMouseUp={handleTextareaMouseUp}
-            onMouseDown={handleTextareaMouseDown}
-            rows={5}
-          />
-        </div>
-        
-        {isCaching && (
-          <div className="practice-status">Caching pronunciation...</div>
-        )}
-
-        <div className="practice-controls">
-          <button 
-            className="practice-button" 
-            onClick={handlePracticeTTS}
-            disabled={!targetText.trim()}
-            title={isPracticePlaying ? "Pause" : "Listen to pronunciation"}
-          >
-            <span className="icon">{isPracticePlaying ? 'pause' : 'volume_up'}</span> 
-            {isPracticePlaying ? 'Pause' : 'Listen'}
-          </button>
-          
-          <button 
-            className={`practice-button mic-toggle ${connected ? 'active' : ''}`} 
-            onClick={handlePracticeMic}
-            title={connected ? "Stop Recording" : "Read Aloud"}
-            disabled={!targetText.trim()}
-          >
-            <span className="icon">{connected ? 'stop' : 'mic'}</span> 
-            {connected ? 'Stop' : 'Read Aloud'}
-          </button>
-
-          <button 
-            className="practice-button" 
-            onClick={handleClearPractice}
-            disabled={!targetText.trim()}
-            title="Clear text"
-          >
-            <span className="icon">delete</span> Clear
-          </button>
-        </div>
-        
-        {practiceError && (
-          <div className="practice-error">
-            <span className="icon">error</span> {practiceError}
-          </div>
-        )}
-      </div>
-
-      {/* Conversation View */}
-      {turns.length === 0 && !targetText ? (
-        <WelcomeScreen />
-      ) : (
-        <div className="transcription-view" ref={scrollRef}>
-          {turns.map((t, i) => (
-            <div
-              key={i}
-              className={`transcription-entry ${t.role} ${!t.isFinal ? 'interim' : ''
-                }`}
+            />
+            <button 
+                className="practice-button" 
+                onClick={handleGenerateTopic}
+                disabled={isGenerating}
             >
-              <div className="transcription-header">
-                <div className="transcription-source">
-                  {t.role === 'user'
-                    ? 'You'
-                    : t.role === 'agent'
-                      ? 'Agent'
-                      : 'System'}
+                {isGenerating ? (
+                    <>
+                       <span className="icon">sync</span> Generating...
+                    </>
+                ) : (
+                    <>
+                       <span className="icon">lightbulb</span> Generate Text
+                    </>
+                )}
+            </button>
+            <button 
+                className="practice-button guide-button" 
+                onClick={() => setShowGuide(true)}
+                title="Pronunciation Guide"
+            >
+                <span className="icon">help</span>
+            </button>
+         </div>
+         {isCaching && (
+             <div className="practice-status">Caching pronunciation...</div>
+         )}
+         <div className="practice-input-container">
+            <textarea 
+                className="practice-textarea" 
+                value={targetText}
+                onChange={(e) => setTargetText(e.target.value)}
+                placeholder="Enter English text here to practice..."
+                rows={5}
+                onMouseUp={handleTextareaMouseUp}
+                onMouseDown={handleTextareaMouseDown}
+            />
+         </div>
+         
+         <div className="practice-controls">
+            <button 
+                className="practice-button" 
+                onClick={handlePracticeTTS}
+                disabled={!targetText}
+            >
+                {isPracticePlaying ? (
+                    <>
+                    <span className="icon">pause</span> Pause
+                    </>
+                ) : (
+                    <>
+                    <span className="icon">volume_up</span> Listen
+                    </>
+                )}
+            </button>
+            
+            <button
+                className={cn("practice-button mic-toggle", { active: isPracticeRecording })}
+                onClick={handlePracticeMicToggle}
+                disabled={!targetText}
+            >
+                <span className="icon">mic</span>
+                {isPracticeRecording ? "Stop & Check" : "Read Aloud"}
+            </button>
+            
+            <button 
+                className="practice-button" 
+                onClick={handleClearPractice}
+                disabled={!targetText && !manualTopic}
+            >
+                <span className="icon">delete</span> Clear
+            </button>
+         </div>
+
+         {practiceError && (
+             <div className="practice-error">
+                 <span className="icon">error</span> {practiceError}
+             </div>
+         )}
+         
+         {practiceFeedback && (
+             <div className="pronunciation-feedback">
+                 <div className="pronunciation-assessment">
+                     <strong>Overall:</strong> {practiceFeedback.overall_assessment}
+                 </div>
+                 <div className="pronunciation-text">
+                     {renderFeedbackText(targetText, practiceFeedback.words)}
+                 </div>
+             </div>
+         )}
+      </div>
+      )}
+
+      {activeTab === 'conversation' && (
+          <>
+            {!connected ? (
+                <WelcomeScreen />
+            ) : (
+                <div className="transcription-view" ref={scrollRef}>
+                    {turns.map((turn) => (
+                        <div
+                        key={turn.id}
+                        className={cn('transcription-entry', turn.role, {
+                            interim: !turn.isFinal,
+                        })}
+                        >
+                        <div className="transcription-header">
+                            <span className="transcription-source">
+                            {turn.role === 'agent' ? 'Gemini' : 'You'}
+                            </span>
+                            <div className="transcription-meta">
+                            <span className="transcription-timestamp">
+                                {formatTimestamp(turn.timestamp)}
+                            </span>
+                            </div>
+                        </div>
+
+                        <div className="transcription-text-content">
+                            {renderContent(turn.text)}
+                        </div>
+                        </div>
+                    ))}
                 </div>
-                <div className="transcription-meta">
-                  <div className="transcription-timestamp">
-                    {formatTimestamp(t.timestamp)}
-                  </div>
-                  {(t.role === 'agent' || t.role === 'user') && t.isFinal && t.text.trim() && (
-                    <button
-                      className="tts-play-button"
-                      onClick={() => handlePlayTTS(t)}
-                      disabled={!!playingTurnId}
-                      aria-label={t.role === 'user' ? "Play audio, show IPA, and check grammar for this message" : "Play audio and show IPA for this message"}
-                      title={t.role === 'user' ? "Read aloud, show IPA & check grammar" : "Read aloud and show IPA"}
-                    >
-                      <span className="icon">
-                        {playingTurnId === t.id ? 'hourglass_top' : 'volume_up'}
-                      </span>
-                    </button>
-                  )}
-                </div>
-              </div>
-              <div className="transcription-text-content">
-                {t.role === 'user' && t.pronunciationFeedback
-                  ? renderFeedbackText(t)
-                  : renderContent(t.text)}
-              </div>
-              {t.ipa && (
-                <div className="transcription-ipa-content">{t.ipa}</div>
-              )}
-              {t.role === 'user' && t.pronunciationFeedback?.overall_assessment && (
-                <div className="pronunciation-feedback">
-                  <div className="pronunciation-assessment">
-                    {t.pronunciationFeedback.overall_assessment}
-                  </div>
-                </div>
-              )}
-              {t.role === 'user' && t.grammarFeedback && (
-                <div className="grammar-feedback">
-                  <h4>Grammar Feedback</h4>
-                  <div className="grammar-assessment">
-                    {t.grammarFeedback.overall_assessment}
-                  </div>
-                  {t.grammarFeedback.corrections.length > 0 && (
-                    <ul className="grammar-corrections-list">
-                      {t.grammarFeedback.corrections.map((c, i) => (
-                        <li key={i}>
-                          <p>
-                            <span className="grammar-original">{c.original}</span> →{' '}
-                            <span className="grammar-corrected">{c.corrected}</span>
-                          </p>
-                          <p className="grammar-explanation">{c.explanation}</p>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </div>
-              )}
-              {t.groundingChunks && t.groundingChunks.length > 0 && (
-                <div className="grounding-chunks">
-                  <strong>Sources:</strong>
-                  <ul>
-                    {t.groundingChunks
-                      // FIX: Ensure that the chunk has a web property and a uri before rendering.
-                      .filter(chunk => chunk.web && chunk.web.uri)
-                      .map((chunk, index) => (
-                        <li key={index}>
-                          <a
-                            href={chunk.web!.uri}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            {chunk.web!.title || chunk.web!.uri}
-                          </a>
-                        </li>
-                      ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
+            )}
+            <ControlTray />
+          </>
+      )}
+
+      </div>
+      </main>
+
+      {/* Tooltips */}
+      {selectedWordTooltip && (
+          <div 
+            className="selection-tooltip"
+            style={{ 
+                left: selectedWordTooltip.x, 
+                top: selectedWordTooltip.y 
+            }}
+          >
+              <div className="tooltip-word">{selectedWordTooltip.word}</div>
+              <div className="tooltip-ipa">{selectedWordTooltip.ipa}</div>
+              <div className="tooltip-translation">{selectedWordTooltip.translation}</div>
+          </div>
+      )}
+
+      {feedbackTooltip && (
+          <div 
+             className="feedback-tooltip"
+             style={{
+                 left: feedbackTooltip.x,
+                 top: feedbackTooltip.y
+             }}
+          >
+             <div className="feedback-header">{feedbackTooltip.data.word}</div>
+             <div className="feedback-comparison">
+                 <div className="comparison-item">
+                     <span className="label">You said:</span>
+                     <span className="ipa spoken">{feedbackTooltip.data.phonetic_spoken || "N/A"}</span>
+                 </div>
+                 <div className="comparison-item">
+                     <span className="label">Target:</span>
+                     <span className="ipa target">{feedbackTooltip.data.phonetic_target || "N/A"}</span>
+                 </div>
+             </div>
+             <div className="feedback-body">
+                 {feedbackTooltip.data.feedback}
+             </div>
+             {feedbackTooltip.data.tongue_placement && (
+                 <div className="feedback-tips">
+                     <span className="icon">tips_and_updates</span>
+                     {feedbackTooltip.data.tongue_placement}
+                 </div>
+             )}
+          </div>
       )}
       
-      {selectedWordTooltip && (
-        <div 
-          className="selection-tooltip"
-          style={{ 
-              left: selectedWordTooltip.x, 
-              top: selectedWordTooltip.y - 10 
-          }}
-        >
-          <div className="tooltip-word">{selectedWordTooltip.word}</div>
-          <div className="tooltip-ipa">{selectedWordTooltip.ipa || '...'}</div>
-          {selectedWordTooltip.translation && (
-             <div className="tooltip-translation">{selectedWordTooltip.translation}</div>
-          )}
-        </div>
-      )}
+      {showGuide && <PronunciationGuide onClose={() => setShowGuide(false)} />}
     </div>
   );
 }

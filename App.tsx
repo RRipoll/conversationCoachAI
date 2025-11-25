@@ -21,7 +21,6 @@
 
 import ErrorScreen from './components/demo/ErrorScreen';
 import StreamingConsole from './components/demo/streaming-console/StreamingConsole';
-import ControlTray from './components/console/control-tray/ControlTray';
 
 import Header from './components/Header';
 import Sidebar from './components/Sidebar';
@@ -45,14 +44,7 @@ function App() {
         <ErrorScreen />
         <Header />
         <Sidebar />
-        <div className="streaming-console">
-          <main>
-            <div className="main-app-area">
-              <StreamingConsole />
-              <ControlTray />
-            </div>
-          </main>
-        </div>
+        <StreamingConsole />
       </LiveAPIProvider>
     </div>
   );

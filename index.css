@@ -8,6 +8,11 @@
 
 
 
+
+
+
+
+
 body {
   margin: 0;
   font-family:
@@ -461,15 +466,49 @@ header .export-button {
   gap: 1rem;
   max-width: 100%;
   overflow: hidden;
+  margin-top: 60px; /* Offset for fixed header */
 }
 
 .streaming-console .main-app-area {
   display: flex;
   flex: 1;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   position: relative;
   width: 100%;
+  height: 100%;
+}
+
+/* Tab Navigation */
+.tab-navigation {
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+    margin-bottom: 20px;
+    width: 100%;
+    border-bottom: 1px solid var(--Neutral-20);
+}
+
+.tab-btn {
+    background: transparent;
+    color: var(--gray-500);
+    border: none;
+    border-bottom: 3px solid transparent;
+    padding: 10px 20px;
+    font-size: 1.1rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.tab-btn:hover {
+    color: var(--gray-300);
+}
+
+.tab-btn.active {
+    color: var(--text);
+    border-bottom-color: var(--accent-blue);
 }
 
 .streaming-console .function-call {
@@ -1541,4 +1580,246 @@ form button:first-of-type {
   margin-top: -8px;
   margin-bottom: 8px;
   padding-left: 4px;
+}
+
+.feedback-tooltip {
+    position: fixed;
+    background-color: var(--Neutral-5);
+    border: 1px solid var(--accent-blue);
+    border-radius: 12px;
+    padding: 16px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    z-index: 2000;
+    width: 350px;
+    pointer-events: none;
+    transform: translateY(10px);
+}
+
+.feedback-header {
+    font-weight: bold;
+    font-size: 1.1rem;
+    color: var(--text);
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--Neutral-20);
+    text-transform: capitalize;
+}
+
+.feedback-comparison {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 16px;
+    background-color: var(--Neutral-10);
+    padding: 8px;
+    border-radius: 8px;
+}
+
+.comparison-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+}
+
+.comparison-item .label {
+    font-size: 0.75rem;
+    color: var(--gray-500);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.comparison-item .ipa {
+    font-family: 'Roboto Mono', monospace;
+    font-size: 1rem;
+}
+
+.comparison-item .ipa.spoken {
+    color: var(--Red-400);
+}
+
+.comparison-item .ipa.target {
+    color: var(--Green-500);
+}
+
+.feedback-body {
+    font-size: 0.9rem;
+    color: var(--gray-300);
+    line-height: 1.4;
+    margin-bottom: 12px;
+}
+
+.feedback-tips {
+    display: flex;
+    gap: 8px;
+    background-color: rgba(66, 133, 244, 0.1);
+    border: 1px solid rgba(66, 133, 244, 0.3);
+    padding: 10px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    color: var(--Blue-400);
+    align-items: flex-start;
+}
+
+.feedback-tips .icon {
+    font-size: 18px;
+    color: var(--Blue-400);
+    flex-shrink: 0;
+    margin-top: 1px;
+}
+
+/* Pronunciation Guide */
+.pronunciation-guide h2 {
+    color: var(--accent-blue-headers);
+    margin-bottom: 10px;
+}
+
+.pronunciation-guide h3 {
+    margin-top: 20px;
+    margin-bottom: 12px;
+    font-size: 1.1rem;
+    color: var(--text);
+    border-bottom: 1px solid var(--Neutral-30);
+    padding-bottom: 4px;
+}
+
+.guide-intro {
+    color: var(--gray-300);
+    font-size: 0.95rem;
+    line-height: 1.5;
+}
+
+.guide-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+    gap: 10px;
+}
+
+.guide-item {
+    background-color: var(--Neutral-15);
+    border: 1px solid var(--Neutral-30);
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    cursor: pointer; /* Added pointer cursor */
+    transition: background-color 0.2s, border-color 0.2s;
+}
+
+.guide-item:hover {
+    background-color: var(--Neutral-20);
+    border-color: var(--gray-500);
+}
+
+.guide-item.playing {
+    border-color: var(--accent-blue);
+    background-color: rgba(161, 228, 242, 0.1);
+}
+
+.guide-item .ipa-symbol {
+    font-family: 'Roboto Mono', monospace;
+    font-size: 1.2rem;
+    color: var(--accent-blue);
+    font-weight: bold;
+}
+
+.guide-item .word-example {
+    font-size: 0.8rem;
+    color: var(--gray-300);
+}
+
+.guide-item .word-example strong {
+    color: var(--text);
+    text-decoration: underline;
+}
+
+.guide-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.guide-row {
+    display: flex;
+    align-items: center;
+    background-color: var(--Neutral-15);
+    padding: 10px;
+    border-radius: 8px;
+    gap: 16px;
+    border: 1px solid var(--Neutral-30);
+    cursor: pointer; /* Added pointer cursor */
+    transition: background-color 0.2s, border-color 0.2s;
+}
+
+.guide-row:hover {
+    background-color: var(--Neutral-20);
+    border-color: var(--gray-500);
+}
+
+.guide-row.playing {
+    border-color: var(--accent-blue);
+    background-color: rgba(161, 228, 242, 0.1);
+}
+
+.guide-col-symbol {
+    width: 40px;
+    text-align: center;
+    font-family: 'Roboto Mono', monospace;
+    font-size: 1.2rem;
+    color: var(--accent-blue);
+    font-weight: bold;
+    flex-shrink: 0;
+}
+
+.guide-col-word {
+    width: 100px;
+    font-size: 0.9rem;
+    color: var(--gray-300);
+    flex-shrink: 0;
+}
+
+.guide-col-word strong {
+    color: var(--text);
+    text-decoration: underline;
+}
+
+.guide-col-desc {
+    font-size: 0.85rem;
+    color: var(--gray-500);
+    line-height: 1.3;
+}
+
+.guide-actions {
+    margin-top: 24px;
+    display: flex;
+    justify-content: flex-end;
+}
+
+.guide-close-btn {
+    background-color: var(--Blue-500);
+    color: white;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-weight: 500;
+    transition: background-color 0.2s;
+}
+
+.guide-close-btn:hover {
+    background-color: var(--Blue-400);
+}
+
+.guide-button {
+    padding: 10px;
+    border-radius: 8px;
+    background-color: var(--Neutral-20);
+    color: var(--gray-300);
+    border: 1px solid transparent;
+}
+
+.guide-button:hover {
+    background-color: var(--Neutral-30);
+    color: var(--text);
 }
