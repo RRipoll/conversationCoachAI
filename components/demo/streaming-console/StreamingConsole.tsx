@@ -361,8 +361,20 @@ export default function StreamingConsole() {
                     description:
                       'Specific feedback for this word. If "good", this can be a simple encouragement.',
                   },
+                  phonetic_spoken: {
+                    type: Type.STRING,
+                    description: 'IPA transcription of how the user pronounced the word.',
+                  },
+                  phonetic_target: {
+                    type: Type.STRING,
+                    description: 'Correct IPA transcription of the word.',
+                  },
+                  tongue_placement: {
+                    type: Type.STRING,
+                    description: 'Specific advice on tongue placement or mouth shape to correct the pronunciation.',
+                  },
                 },
-                required: ['word', 'accuracy', 'feedback'],
+                required: ['word', 'accuracy', 'feedback', 'phonetic_spoken', 'phonetic_target', 'tongue_placement'],
               },
             },
           },
@@ -379,9 +391,15 @@ export default function StreamingConsole() {
           - If the transcript matches the target closely, mark words as "good".
           - If words are missing or different in a way that suggests mispronunciation, mark them as "needs_improvement" or "incorrect".
           - Provide an overall assessment and a word-by-word breakdown of the TARGET text.
+          - For each word, provide the IPA transcription of how it likely sounded (phonetic_spoken) and how it should sound (phonetic_target).
+          - If the word was mispronounced, provide specific instructions on tongue placement or mouth shape (tongue_placement) to correct it.
           - Respond ONLY with a JSON object that conforms to the provided schema.`;
         } else {
-          prompt = `You are an expert English pronunciation coach. Analyze the pronunciation of the following text from a non-native English speaker. Provide an overall assessment and a word-by-word breakdown of every word. Respond ONLY with a JSON object that conforms to the provided schema.
+          prompt = `You are an expert English pronunciation coach. Analyze the pronunciation of the following text from a non-native English speaker. 
+          - Provide an overall assessment and a word-by-word breakdown of every word.
+          - For each word, provide the IPA transcription of how it likely sounded (phonetic_spoken) and how it should sound (phonetic_target).
+          - Provide specific instructions on tongue placement or mouth shape (tongue_placement) to improve pronunciation.
+          - Respond ONLY with a JSON object that conforms to the provided schema.
 
 Text to analyze: "${turn.text}"`;
         }
@@ -551,18 +569,30 @@ Text to analyze: "${turn.text}"`;
 
     return (
       <>
-        {turn.pronunciationFeedback.words.map((wordInfo, index) => (
-          <span
-            key={index}
-            className={`word-feedback accuracy-${wordInfo.accuracy.replace(
-              /_/g,
-              '-',
-            )}`}
-            data-feedback={wordInfo.feedback}
-          >
-            {wordInfo.word}{' '}
-          </span>
-        ))}
+        {turn.pronunciationFeedback.words.map((wordInfo, index) => {
+          const details = [];
+          if (wordInfo.feedback) details.push(wordInfo.feedback);
+          if (wordInfo.phonetic_spoken && wordInfo.phonetic_target) {
+             details.push(`Heard: /${wordInfo.phonetic_spoken}/ vs Target: /${wordInfo.phonetic_target}/`);
+          }
+          if (wordInfo.tongue_placement) {
+             details.push(`Tip: ${wordInfo.tongue_placement}`);
+          }
+          const feedbackString = details.join('\n\n');
+          
+          return (
+            <span
+              key={index}
+              className={`word-feedback accuracy-${wordInfo.accuracy.replace(
+                /_/g,
+                '-',
+              )}`}
+              data-feedback={feedbackString}
+            >
+              {wordInfo.word}{' '}
+            </span>
+          );
+        })}
       </>
     );
   };
@@ -770,7 +800,13 @@ Text to analyze: "${turn.text}"`;
         },
       });
       
-      const data = JSON.parse(response.text);
+      let jsonText = response.text;
+      // Basic cleanup to remove markdown code blocks if present
+      if (jsonText.startsWith('```')) {
+         jsonText = jsonText.replace(/^```(json)?\n?/, '').replace(/\n?```$/, '');
+      }
+
+      const data = JSON.parse(jsonText);
       
       if (data.words) {
         data.words.forEach((item: any) => {
@@ -781,9 +817,12 @@ Text to analyze: "${turn.text}"`;
         });
       }
 
-    } catch (e) {
-      if (isManual || !text.includes("Searching")) {
-        handleOpError(e);
+    } catch (e: any) {
+      // Background task failed, log warning only.
+      // We do not want to setPracticeError for background cache failures, especially syntax errors from truncated JSON.
+      console.warn("Background IPA cache fetch failed:", e);
+      if (isManual) {
+         handleOpError(e);
       }
     } finally {
       setIsCaching(false);

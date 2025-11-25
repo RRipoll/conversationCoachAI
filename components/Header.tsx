@@ -7,7 +7,7 @@ import { useUI } from '@/lib/state';
 
 export default function Header() {
   const { toggleSidebar } = useUI();
-  const appVersion = "0.3.0"; // Increment this version with each change
+  const appVersion = "0.5.0"; // Increment this version with each change
 
   return (
     <header>

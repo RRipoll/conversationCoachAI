@@ -110,6 +110,9 @@ export interface PronunciationFeedback {
     word: string;
     accuracy: 'good' | 'needs_improvement' | 'incorrect';
     feedback: string;
+    phonetic_spoken?: string;
+    phonetic_target?: string;
+    tongue_placement?: string;
   }>;
 }
 

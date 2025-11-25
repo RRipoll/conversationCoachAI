@@ -6,6 +6,8 @@
 
 
 
+
+
 body {
   margin: 0;
   font-family:
@@ -982,6 +984,7 @@ header .export-button {
 .pronunciation-assessment {
   color: var(--Neutral-80);
   font-style: italic;
+  margin-bottom: 12px;
 }
 
 .word-feedback {
@@ -1019,7 +1022,7 @@ header .export-button {
   font-size: 0.85rem;
   white-space: pre-wrap;
   width: max-content;
-  max-width: 250px;
+  max-width: 350px;
   text-align: left;
   visibility: hidden;
   opacity: 0;
