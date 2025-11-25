@@ -3,9 +3,11 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
 */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import PopUp from '../popup/PopUp';
 import WelcomeScreen from '../welcome-screen/WelcomeScreen';
+import cn from 'classnames';
+
 // FIX: Import LiveServerContent to correctly type the content handler.
 import {
   GoogleGenAI,
@@ -13,6 +15,7 @@ import {
   Type,
   Modality,
 } from '@google/genai';
+import { debounce } from 'lodash';
 
 import { useLiveAPIContext } from '../../../contexts/LiveAPIContext';
 import {
@@ -71,20 +74,25 @@ export default function StreamingConsole() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const [playingTurnId, setPlayingTurnId] = useState<string | null>(null);
   const fetchingFeedbackRef = useRef(new Set<string>());
-
+  
   // Practice Mode State
   const [targetText, setTargetText] = useState("");
-  const [targetIpa, setTargetIpa] = useState("");
   const [isPracticePlaying, setIsPracticePlaying] = useState(false);
   const [manualTopic, setManualTopic] = useState("");
   const [practiceError, setPracticeError] = useState<string | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isCaching, setIsCaching] = useState(false);
   const targetTextRef = useRef(targetText);
   const practiceSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  
+  // IPA Cache: Stores word -> { ipa, translation }
+  const ipaCacheRef = useRef<Map<string, { ipa: string; translation: string }>>(new Map());
   
   // Word Selection Tooltip State
   const [selectedWordTooltip, setSelectedWordTooltip] = useState<{
     word: string;
     ipa: string | null;
+    translation: string | null;
     x: number;
     y: number;
   } | null>(null);
@@ -129,6 +137,11 @@ export default function StreamingConsole() {
   };
 
   const isQuotaError = (e: any) => {
+    if (!e) return false;
+    // If e is a string, check content
+    if (typeof e === 'string') {
+        return e.includes('429') || e.includes('RESOURCE_EXHAUSTED');
+    }
     return (
       e.message?.includes('429') || 
       e.message?.includes('RESOURCE_EXHAUSTED') || 
@@ -556,8 +569,9 @@ Text to analyze: "${turn.text}"`;
 
   // Practice Mode Handlers
   const handleGenerateTopic = async () => {
-    if (!ai) return;
+    if (!ai || isGenerating) return;
     setPracticeError(null);
+    setIsGenerating(true);
     try {
       let searchTopic = manualTopic.trim();
       
@@ -578,12 +592,135 @@ Text to analyze: "${turn.text}"`;
           "Reactive Programming in Java",
           "Java Design Patterns",
           "Hibernate and JPA",
-          "GraalVM and Native Image"
+          "GraalVM and Native Image",
+          "Object-Oriented Programming (OOP)",
+"Classes and Objects",
+"Inheritance",
+"Polymorphism",
+"Encapsulation",
+"Interfaces and Abstract Classes",
+"Collections Framework",
+"List, Set, Map interfaces",
+"ArrayList, LinkedList, HashMap",
+"Streams API",
+"Lambda Expressions",
+"Functional Interfaces",
+"Exception Handling",
+"Try-Catch-Finally",
+"Custom Exceptions",
+"Multithreading",
+"Thread Management",
+"Synchronization",
+"Locks and ReentrantLock",
+"Concurrent Collections",
+"Generics",
+"Type Parameters",
+"Wildcards",
+"Annotations",
+"Reflection API",
+"Spring Framework",
+"Spring Boot",
+"Spring MVC",
+"Spring Data",
+"Spring WebFlux",
+"Reactive Programming",
+"Project Reactor",
+"RxJava",
+"Mono and Flux",
+"REST APIs",
+"HTTP Methods and Status Codes",
+"JSON Processing",
+"Jackson Library",
+"GSON",
+"Microservices Architecture",
+"Service-to-Service Communication",
+"Circuit Breaker Pattern",
+"Hystrix",
+"Resilience4j",
+"API Gateway",
+"Service Discovery",
+"Load Balancing",
+"Database Access",
+"JDBC",
+"JPA and Hibernate",
+"Connection Pooling",
+"SQL and Query Optimization",
+"Transaction Management",
+"ACID Properties",
+"Caching Strategies",
+"Redis Integration",
+"Memcached",
+"Message Queues",
+"RabbitMQ",
+"Apache Kafka",
+"Testing",
+"Unit Testing with JUnit",
+"Mockito",
+"Integration Testing",
+"Test Containers",
+"Performance Testing",
+"Security",
+"Authentication and Authorization",
+"Spring Security",
+"JWT Tokens",
+"OAuth 2.0",
+"SSL/TLS",
+"Encryption and Hashing",
+"Logging",
+"SLF4J",
+"Logback",
+"Log Aggregation",
+"Monitoring and Metrics",
+"Micrometer",
+"Prometheus",
+"Distributed Tracing",
+"Jaeger",
+"Cloud Deployment",
+"Docker",
+"Kubernetes",
+"AWS Services",
+"AWS ECS",
+"AWS EKS",
+"AWS Lambda",
+"CI/CD Pipelines",
+"DevSecOps",
+"Maven",
+"Gradle",
+"Git Version Control",
+"API Documentation",
+"OpenAPI/Swagger",
+"Design Patterns",
+"Singleton Pattern",
+"Factory Pattern",
+"Builder Pattern",
+"Observer Pattern",
+"Strategy Pattern",
+"Decorator Pattern",
+"Adapter Pattern",
+"Proxy Pattern",
+"Saga Pattern",
+"CQRS Pattern",
+"Event Sourcing",
+"Domain-Driven Design (DDD)",
+"Dependency Injection",
+"Inversion of Control (IoC)",
+"SOLID Principles",
+"Clean Code",
+"Code Review Practices",
+"Regular Expressions",
+"Date and Time API",
+"Java 8+ Features",
+"Java 11+ Features",
+"Records",
+"Sealed Classes",
+"Text Blocks",
+"Blockchain Integration",
+"Smart Contracts Integration",
+"Web3 Libraries"
         ];
         searchTopic = javaSubTopics[Math.floor(Math.random() * javaSubTopics.length)];
       }
 
-      setTargetText(`Searching for a topic related to "${searchTopic}"...`);
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: `Search for interesting or trending topics specifically related to "${searchTopic}". Randomly select one specific concept, tool, or feature from the search results. Write a cohesive, educational paragraph of 100 to 200 words explaining this specific topic. The text should be suitable for reading practice. Do not use bullet points or markdown formatting.`,
@@ -593,28 +730,83 @@ Text to analyze: "${turn.text}"`;
       });
       if (response.text) {
         setTargetText(response.text.trim());
-      } else {
-        setTargetText("");
       }
     } catch (error) {
-      setTargetText("Error fetching topic. Please try again.");
       handleOpError(error);
+    } finally {
+      setIsGenerating(false);
     }
   };
 
-  const handleGetIPA = async () => {
-    if (!ai || !targetText) return;
-    setPracticeError(null);
+  const fetchIPA = useCallback(async (text: string, isManual: boolean = false) => {
+    if (!ai || !text.trim()) return;
+    if (isManual) setPracticeError(null);
+    setIsCaching(true);
+
     try {
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash',
-        contents: `Provide the International Phonetic Alphabet (IPA) transcription for the following English text. Return only the IPA string, without any surrounding text, labels, or markdown formatting. Text: "${targetText}"`,
+        contents: `Provide the IPA transcription and Spanish translation for the text: "${text}". Return a JSON object with properties: "full_ipa" (string) containing the complete transcription, and "words" (array) containing objects with "word", "ipa", and "spanish_translation" properties for each word.`,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              full_ipa: { type: Type.STRING },
+              words: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    word: { type: Type.STRING },
+                    ipa: { type: Type.STRING },
+                    spanish_translation: { type: Type.STRING }
+                  }
+                }
+              }
+            },
+            required: ["full_ipa", "words"]
+          }
+        },
       });
-      setTargetIpa(response.text.trim());
+      
+      const data = JSON.parse(response.text);
+      
+      if (data.words) {
+        data.words.forEach((item: any) => {
+          if (item.word && item.ipa) {
+            const cleanWord = item.word.toLowerCase().replace(/[^\w']/g, "");
+            ipaCacheRef.current.set(cleanWord, { ipa: item.ipa, translation: item.spanish_translation || '' });
+          }
+        });
+      }
+
     } catch (e) {
-      handleOpError(e);
+      if (isManual || !text.includes("Searching")) {
+        handleOpError(e);
+      }
+    } finally {
+      setIsCaching(false);
     }
-  };
+  }, [ai]);
+
+  const debouncedFetchIPA = useMemo(
+    () => debounce((text: string) => fetchIPA(text, false), 1000),
+    [fetchIPA]
+  );
+
+  useEffect(() => {
+    if (targetText.trim() && !targetText.startsWith("Searching")) {
+      debouncedFetchIPA(targetText);
+    } else {
+      ipaCacheRef.current.clear();
+      debouncedFetchIPA.cancel();
+    }
+    return () => {
+      debouncedFetchIPA.cancel();
+    };
+  }, [targetText, debouncedFetchIPA]);
+
 
   const handlePracticeMic = async () => {
     if (connected) {
@@ -717,7 +909,6 @@ Text to analyze: "${turn.text}"`;
 
   const handleClearPractice = () => {
     setTargetText("");
-    setTargetIpa("");
     setPracticeError(null);
     setSelectedWordTooltip(null);
     if (practiceSourceRef.current) {
@@ -732,6 +923,7 @@ Text to analyze: "${turn.text}"`;
     setIsPracticePlaying(false);
     practiceAudioBufferRef.current = null;
     practicePausedAtRef.current = 0;
+    ipaCacheRef.current.clear();
     if (connected) {
       disconnect();
     }
@@ -752,9 +944,17 @@ Text to analyze: "${turn.text}"`;
     // Calculate position: e.clientX, e.clientY are mouse coordinates
     const { clientX, clientY } = e;
 
+    // Check cache first
+    const cleanWord = text.toLowerCase().replace(/[^\w']/g, "");
+    let cachedData = null;
+    if (ipaCacheRef.current.has(cleanWord)) {
+       cachedData = ipaCacheRef.current.get(cleanWord);
+    }
+
     setSelectedWordTooltip({
       word: text,
-      ipa: null,
+      ipa: cachedData?.ipa || null,
+      translation: cachedData?.translation || null,
       x: clientX,
       y: clientY
     });
@@ -791,23 +991,48 @@ Text to analyze: "${turn.text}"`;
         source.start();
       }
     } catch (e) {
-      console.error("Selection TTS error", e);
+      if (isQuotaError(e)) {
+        console.warn("Selection TTS: Quota exceeded");
+      } else {
+        console.error("Selection TTS error", e);
+      }
     }
 
-    // 2. Fetch IPA
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: `Provide the International Phonetic Alphabet (IPA) transcription for the following English text. Return only the IPA string, without any surrounding text, labels, or markdown formatting. Text: "${text}"`,
-      });
-      const ipa = response.text.trim();
-      setSelectedWordTooltip(prev => (prev && prev.word === text ? { ...prev, ipa } : prev));
-    } catch (e: any) {
-      const isQuota = isQuotaError(e);
-      console.error("Selection IPA error", e);
-      
-      const errMsg = isQuota ? 'Quota exceeded' : 'Error';
-      setSelectedWordTooltip(prev => (prev && prev.word === text ? { ...prev, ipa: errMsg } : prev));
+    // 2. Fetch IPA/Translation if not cached
+    if (!cachedData) {
+      try {
+        const response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: `Provide the IPA transcription and Spanish translation for the text: "${text}". Return a JSON object with properties: "ipa" and "spanish_translation".`,
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                ipa: { type: Type.STRING },
+                spanish_translation: { type: Type.STRING }
+              },
+              required: ['ipa', 'spanish_translation']
+            }
+          },
+        });
+        const data = JSON.parse(response.text);
+        
+        setSelectedWordTooltip(prev => (prev && prev.word === text ? { ...prev, ipa: data.ipa, translation: data.spanish_translation } : prev));
+        // Cache it
+        ipaCacheRef.current.set(cleanWord, { ipa: data.ipa, translation: data.spanish_translation });
+        
+      } catch (e: any) {
+         const isQuota = isQuotaError(e);
+         if (isQuota) {
+            console.warn("Selection IPA/Translation: Quota exceeded");
+         } else {
+            console.error("Selection IPA/Translation error", e);
+         }
+         
+         const errMsg = isQuota ? 'Quota exceeded' : 'Error';
+         setSelectedWordTooltip(prev => (prev && prev.word === text ? { ...prev, ipa: errMsg, translation: null } : prev));
+      }
     }
   };
 
@@ -822,8 +1047,7 @@ Text to analyze: "${turn.text}"`;
   return (
     <div className="transcription-container">
       {showPopUp && <PopUp onClose={handleClosePopUp} />}
-      
-      {/* Practice Panel */}
+
       <div className="practice-panel">
         <div className="practice-header">
            <input 
@@ -836,9 +1060,11 @@ Text to analyze: "${turn.text}"`;
            <button
               className="practice-button"
               onClick={handleGenerateTopic}
+              disabled={isGenerating}
               title="Search and generate text for the topic"
            >
-              <span className="icon">search</span> Generate
+              <span className="icon">{isGenerating ? 'hourglass_top' : 'search'}</span> 
+              {isGenerating ? 'Generating...' : 'Generate'}
            </button>
         </div>
         <div className="practice-input-container">
@@ -852,15 +1078,12 @@ Text to analyze: "${turn.text}"`;
             rows={5}
           />
         </div>
-        <div className="practice-controls">
-           <button 
-            className="practice-button" 
-            onClick={handleGetIPA}
-            disabled={!targetText.trim()}
-          >
-            <span className="icon">translate</span> Show IPA
-          </button>
+        
+        {isCaching && (
+          <div className="practice-status">Caching pronunciation...</div>
+        )}
 
+        <div className="practice-controls">
           <button 
             className="practice-button" 
             onClick={handlePracticeTTS}
@@ -884,7 +1107,7 @@ Text to analyze: "${turn.text}"`;
           <button 
             className="practice-button" 
             onClick={handleClearPractice}
-            disabled={!targetText && !targetIpa}
+            disabled={!targetText.trim()}
             title="Clear text"
           >
             <span className="icon">delete</span> Clear
@@ -896,14 +1119,9 @@ Text to analyze: "${turn.text}"`;
             <span className="icon">error</span> {practiceError}
           </div>
         )}
-
-        {targetIpa && (
-          <div className="practice-ipa-display">
-            <span className="ipa-label">IPA:</span> {targetIpa}
-          </div>
-        )}
       </div>
 
+      {/* Conversation View */}
       {turns.length === 0 && !targetText ? (
         <WelcomeScreen />
       ) : (
@@ -1013,6 +1231,9 @@ Text to analyze: "${turn.text}"`;
         >
           <div className="tooltip-word">{selectedWordTooltip.word}</div>
           <div className="tooltip-ipa">{selectedWordTooltip.ipa || '...'}</div>
+          {selectedWordTooltip.translation && (
+             <div className="tooltip-translation">{selectedWordTooltip.translation}</div>
+          )}
         </div>
       )}
     </div>

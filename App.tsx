@@ -1,3 +1,4 @@
+
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -18,9 +19,9 @@
  * limitations under the License.
  */
 
-import ControlTray from './components/console/control-tray/ControlTray';
 import ErrorScreen from './components/demo/ErrorScreen';
 import StreamingConsole from './components/demo/streaming-console/StreamingConsole';
+import ControlTray from './components/console/control-tray/ControlTray';
 
 import Header from './components/Header';
 import Sidebar from './components/Sidebar';
@@ -48,10 +49,8 @@ function App() {
           <main>
             <div className="main-app-area">
               <StreamingConsole />
-
+              <ControlTray />
             </div>
-
-            <ControlTray></ControlTray>
           </main>
         </div>
       </LiveAPIProvider>
