@@ -109,6 +109,7 @@ export default function StreamingConsole() {
   const [activeTab, setActiveTab] = useState<'reading' | 'conversation'>('reading');
 
   // Practice Mode State
+  const [targetTitle, setTargetTitle] = useState("");
   const [targetText, setTargetText] = useState("");
   const [currentSelection, setCurrentSelection] = useState("");
   const [analyzedText, setAnalyzedText] = useState("");
@@ -156,6 +157,20 @@ export default function StreamingConsole() {
   const practicePausedAtRef = useRef<number>(0);
   const isPausedIntentRef = useRef<boolean>(false);
 
+  const adjustTextareaHeight = useCallback(() => {
+    if (textareaRef.current) {
+        // Reset height to auto to get the correct scrollHeight
+        textareaRef.current.style.height = 'auto';
+        const scrollHeight = textareaRef.current.scrollHeight;
+        
+        // We set the height to the scrollHeight. 
+        // The CSS max-height: 100% on the textarea combined with the flexbox layout of the container
+        // will ensure it doesn't overflow the screen, while 'overflow-y: auto' handles scrolling.
+        const newHeight = Math.max(scrollHeight, 150);
+        textareaRef.current.style.height = `${newHeight}px`;
+    }
+  }, []);
+
   useEffect(() => {
     targetTextRef.current = targetText;
     setPracticeFeedback(null); // Clear feedback when text changes
@@ -178,12 +193,18 @@ export default function StreamingConsole() {
     }
 
     // Auto-resize textarea to fit content
-    if (textareaRef.current) {
-        textareaRef.current.style.height = 'auto';
-        textareaRef.current.style.height = `${Math.max(textareaRef.current.scrollHeight, 150)}px`;
-    }
+    adjustTextareaHeight();
 
-  }, [targetText]);
+  }, [targetText, adjustTextareaHeight]);
+  
+  // Re-adjust height on window resize
+  useEffect(() => {
+      const handleResize = () => {
+          adjustTextareaHeight();
+      };
+      window.addEventListener('resize', handleResize);
+      return () => window.removeEventListener('resize', handleResize);
+  }, [adjustTextareaHeight]);
 
 
   useEffect(() => {
@@ -330,11 +351,14 @@ export default function StreamingConsole() {
     setIsGenerating(true);
     setPracticeError(null);
     setTargetText(""); 
+    setTargetTitle("");
 
     try {
       let prompt = "";
+      const jsonInstruction = `\n\nProvide the response strictly as a JSON object with keys "title" and "text".\nExample:\n{\n  "title": "Java Streams",\n  "text": "Java streams provide..."\n}`;
+
       if (manualTopic.trim()) {
-         prompt = `Generate a cohesive, educational paragraph of 100 to 200 words specifically about "${manualTopic.trim()}". The text should be suitable for reading practice. Do not use bullet points or markdown formatting.`;
+         prompt = `Generate a cohesive, educational paragraph of 100 to 200 words specifically about "${manualTopic.trim()}". The text should be suitable for reading practice. Do not use bullet points or markdown formatting in the 'text' field.${jsonInstruction}`;
       } else {
          const javaSubTopics = [
             "Java Concurrency", "Java Streams API", "Java Collections Framework", 
@@ -466,7 +490,7 @@ export default function StreamingConsole() {
 "Web3 Libraries"
          ];
          const randomSubTopic = javaSubTopics[Math.floor(Math.random() * javaSubTopics.length)];
-         prompt = `Search for recent trending topics in Java programming, specifically focusing on "${randomSubTopic}". Randomly select one specific aspect. Write a cohesive, educational paragraph of 100 to 200 words explaining this topic. The text should be suitable for reading practice. Do not use bullet points or markdown formatting.`;
+         prompt = `Search for recent trending topics in Java programming, specifically focusing on "${randomSubTopic}". Randomly select one specific aspect. Write a cohesive, educational paragraph of 100 to 200 words explaining this topic. The text should be suitable for reading practice. Do not use bullet points or markdown formatting in the 'text' field.${jsonInstruction}`;
       }
 
       const response = await ai.models.generateContent({
@@ -482,7 +506,22 @@ export default function StreamingConsole() {
 
       const text = response.text;
       if (text) {
-        setTargetText(text);
+        try {
+            // Cleanup potential markdown blocks
+            let cleanJson = text.replace(/```json/g, '').replace(/```/g, '').trim();
+            const data = JSON.parse(cleanJson);
+            
+            if (data.title) setTargetTitle(data.title);
+            if (data.text) setTargetText(data.text);
+            
+            // Handle case where text is plain string if JSON structure mismatch (defensive)
+            if (!data.text && !data.title && typeof data === 'string') {
+                setTargetText(data);
+            }
+        } catch (e) {
+            // Fallback for non-JSON response (e.g. from Search tool direct output)
+            setTargetText(text);
+        }
       }
     } catch (e) {
       handleOpError(e);
@@ -681,6 +720,7 @@ export default function StreamingConsole() {
 
   const handleClearPractice = () => {
     setTargetText("");
+    setTargetTitle("");
     setManualTopic("");
     setCurrentSelection("");
     setAnalyzedText("");
@@ -806,15 +846,45 @@ export default function StreamingConsole() {
     handleSelectionChange(e);
 
     const textarea = e.currentTarget;
-    const start = textarea.selectionStart;
-    const end = textarea.selectionEnd;
-    
-    if (start !== end) {
-        const text = textarea.value;
-        const selectedText = text.substring(start, end).trim();
+    let start = textarea.selectionStart;
+    let end = textarea.selectionEnd;
+    const text = textarea.value;
+
+    let selectedText = "";
+
+    // "Smart Select" logic for single tap/click
+    if (start === end) {
+        // User tapped/clicked. Try to find the word boundary.
+        const left = text.slice(0, start).search(/\S+$/);
+        const right = text.slice(start).search(/\s/);
         
-        // Simple heuristic: single word only
-        if (selectedText && !selectedText.includes(' ')) {
+        if (left !== -1) {
+            // Adjust start to beginning of word
+            start = start - (text.slice(0, start).length - left);
+            // Adjust end to end of word
+            if (right === -1) {
+                end = text.length;
+            } else {
+                end = end + right;
+            }
+            
+            // Validate we actually found a word and not just whitespace
+            const candidate = text.slice(start, end);
+            if (/\w/.test(candidate)) {
+                selectedText = candidate;
+                // Programmatically select it to give visual feedback (optional, but good)
+                textarea.setSelectionRange(start, end);
+                setCurrentSelection(selectedText);
+            }
+        }
+    } else {
+        // Standard selection
+        selectedText = text.substring(start, end).trim();
+    }
+    
+    if (selectedText) {
+        // Simple heuristic: single word only for IPA tooltip
+        if (!selectedText.includes(' ')) {
             const word = selectedText.toLowerCase().replace(/[^\w']/g, "");
             
             // 1. Position Tooltip
@@ -1011,6 +1081,13 @@ export default function StreamingConsole() {
              <div className="practice-status">Generating audio...</div>
          )}
          <div className="practice-input-container">
+            <input
+                type="text"
+                className="practice-title-input"
+                placeholder="Title (optional)"
+                value={targetTitle}
+                onChange={(e) => setTargetTitle(e.target.value)}
+            />
             <textarea 
                 ref={textareaRef}
                 className="practice-textarea" 
@@ -1021,6 +1098,11 @@ export default function StreamingConsole() {
                 onMouseUp={handleTextareaMouseUp}
                 onMouseDown={handleTextareaMouseDown}
                 onKeyUp={handleTextareaKeyUp}
+                onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="off"
+                spellCheck={false}
             />
          </div>
          

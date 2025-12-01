@@ -15,6 +15,12 @@
 
 
 
+
+
+
+
+
+
 body {
   margin: 0;
   font-family:
@@ -774,6 +780,9 @@ header .export-button {
   gap: 12px;
   z-index: 10;
   box-shadow: 0 4px 10px rgba(0,0,0,0.2);
+  /* Constrain height to viewport to prevent pushing buttons off screen */
+  max-height: calc(100vh - 150px);
+  overflow: hidden; 
 }
 
 .practice-header {
@@ -781,6 +790,7 @@ header .export-button {
   gap: 10px;
   margin-bottom: 10px;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .topic-input {
@@ -802,6 +812,28 @@ header .export-button {
 
 .practice-input-container {
   width: 100%;
+  display: flex;
+  flex-direction: column;
+  flex: 1; /* Allow to grow/shrink to fill available space */
+  min-height: 0; /* Enable flex shrinking */
+}
+
+.practice-title-input {
+  width: 100%;
+  background-color: transparent;
+  border: none;
+  border-bottom: 1px solid var(--Neutral-20);
+  padding: 8px 0;
+  margin-bottom: 12px;
+  color: var(--text);
+  font-size: 1.2rem;
+  font-weight: bold;
+  font-family: 'Google Sans', sans-serif;
+  flex-shrink: 0;
+}
+.practice-title-input:focus {
+  border-bottom-color: var(--accent-blue-active);
+  outline: none;
 }
 
 .practice-textarea {
@@ -813,7 +845,16 @@ header .export-button {
   color: white;
   font-size: 1.2rem;
   font-family: 'Google Sans', sans-serif;
-  resize: vertical;
+  resize: none; /* Disable manual resize as we auto-resize */
+  /* Prevent iOS magnifying glass and menu */
+  -webkit-touch-callout: none;
+  /* Remove tap highlight */
+  -webkit-tap-highlight-color: transparent;
+  
+  height: auto; /* Managed by JS */
+  max-height: 100%; /* Constrain to container */
+  overflow-y: auto; /* Scroll internally if text is too long */
+  flex-grow: 1;
 }
 
 .practice-textarea:focus {
@@ -825,6 +866,8 @@ header .export-button {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-shrink: 0;
+  margin-top: 4px;
 }
 
 .practice-button {
@@ -1020,6 +1063,7 @@ header .export-button {
   border-radius: 8px;
   border: 1px solid var(--Neutral-30);
   font-size: 0.9rem;
+  flex-shrink: 0;
 }
 
 .pronunciation-assessment {
@@ -1573,6 +1617,7 @@ form button:first-of-type {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .practice-status {
@@ -1582,6 +1627,7 @@ form button:first-of-type {
   margin-top: -8px;
   margin-bottom: 8px;
   padding-left: 4px;
+  flex-shrink: 0;
 }
 
 .practice-status.analyzing {
