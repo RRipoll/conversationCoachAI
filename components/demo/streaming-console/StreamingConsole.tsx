@@ -110,14 +110,20 @@ export default function StreamingConsole() {
 
   // Practice Mode State
   const [targetText, setTargetText] = useState("");
+  const [currentSelection, setCurrentSelection] = useState("");
+  const [analyzedText, setAnalyzedText] = useState("");
   const [isPracticePlaying, setIsPracticePlaying] = useState(false);
+  const [isTTSProcessing, setIsTTSProcessing] = useState(false); // Track TTS processing state
   const [manualTopic, setManualTopic] = useState("");
   const [practiceError, setPracticeError] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isCaching, setIsCaching] = useState(false);
+  const [isAnalyzing, setIsAnalyzing] = useState(false); // Track analysis status
   const [showGuide, setShowGuide] = useState(false); // State for Pronunciation Guide
   const targetTextRef = useRef(targetText);
+  const activeAnalysisTextRef = useRef(""); // Stores the text (full or selection) being analyzed during recording
   const practiceSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   
   // Practice Recorder State
   const [isPracticeRecording, setIsPracticeRecording] = useState(false);
@@ -153,6 +159,7 @@ export default function StreamingConsole() {
   useEffect(() => {
     targetTextRef.current = targetText;
     setPracticeFeedback(null); // Clear feedback when text changes
+    setCurrentSelection(""); // Clear selection state when text changes
     
     // Reset audio buffer and state if text changes
     if (practiceAudioBufferRef.current) {
@@ -167,7 +174,15 @@ export default function StreamingConsole() {
       practiceAudioBufferRef.current = null;
       practicePausedAtRef.current = 0;
       setIsPracticePlaying(false);
+      setIsTTSProcessing(false);
     }
+
+    // Auto-resize textarea to fit content
+    if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+        textareaRef.current.style.height = `${Math.max(textareaRef.current.scrollHeight, 150)}px`;
+    }
+
   }, [targetText]);
 
 
@@ -494,13 +509,13 @@ export default function StreamingConsole() {
     }
 
     // 2. Resume or Start Logic
-    setIsPracticePlaying(true);
 
     try {
         let bufferToPlay = practiceAudioBufferRef.current;
 
         // If no buffer cached, fetch it
         if (!bufferToPlay) {
+            setIsTTSProcessing(true);
             const response = await ai.models.generateContent({
                 model: 'gemini-2.5-flash-preview-tts',
                 contents: [{ parts: [{ text: targetText }] }],
@@ -524,7 +539,10 @@ export default function StreamingConsole() {
                 1
             );
             practiceAudioBufferRef.current = bufferToPlay;
+            setIsTTSProcessing(false);
         }
+
+        setIsPracticePlaying(true);
 
         // Play the buffer
         const source = audioContext.createBufferSource();
@@ -552,36 +570,40 @@ export default function StreamingConsole() {
     } catch (e) {
         handleOpError(e);
         setIsPracticePlaying(false);
+        setIsTTSProcessing(false);
     }
   };
 
   const analyzePronunciation = async () => {
-      if (!ai || !targetText || practiceAudioChunks.current.length === 0) return;
+      const textToAnalyze = activeAnalysisTextRef.current;
+      if (!ai || !textToAnalyze || practiceAudioChunks.current.length === 0) return;
       
-      // 1. Reconstruct raw PCM from base64 chunks
-      const allChunks = practiceAudioChunks.current.map(chunk => base64ToArrayBuffer(chunk));
-      const totalLength = allChunks.reduce((acc, chunk) => acc + chunk.byteLength, 0);
-      const pcmBuffer = new Uint8Array(totalLength);
-      let offset = 0;
-      for (const chunk of allChunks) {
-          pcmBuffer.set(new Uint8Array(chunk), offset);
-          offset += chunk.byteLength;
-      }
+      setIsAnalyzing(true);
       
-      // 2. Add WAV Header
-      // AudioRecorder defaults to 16000Hz, 1 channel
-      const sampleRate = 16000;
-      const wavHeader = createWavHeader(sampleRate, totalLength);
-      const wavFile = new Uint8Array(wavHeader.byteLength + totalLength);
-      wavFile.set(new Uint8Array(wavHeader), 0);
-      wavFile.set(pcmBuffer, wavHeader.byteLength);
-
-      // 3. Convert back to Base64
-      const fullBase64 = arrayBufferToBase64(wavFile.buffer);
-
       try {
+          // 1. Reconstruct raw PCM from base64 chunks
+          const allChunks = practiceAudioChunks.current.map(chunk => base64ToArrayBuffer(chunk));
+          const totalLength = allChunks.reduce((acc, chunk) => acc + chunk.byteLength, 0);
+          const pcmBuffer = new Uint8Array(totalLength);
+          let offset = 0;
+          for (const chunk of allChunks) {
+              pcmBuffer.set(new Uint8Array(chunk), offset);
+              offset += chunk.byteLength;
+          }
+          
+          // 2. Add WAV Header
+          // AudioRecorder defaults to 16000Hz, 1 channel
+          const sampleRate = 16000;
+          const wavHeader = createWavHeader(sampleRate, totalLength);
+          const wavFile = new Uint8Array(wavHeader.byteLength + totalLength);
+          wavFile.set(new Uint8Array(wavHeader), 0);
+          wavFile.set(pcmBuffer, wavHeader.byteLength);
+
+          // 3. Convert back to Base64
+          const fullBase64 = arrayBufferToBase64(wavFile.buffer);
+
           const prompt = `
-          The user is practicing reading the following text: "${targetText}".
+          The user is practicing reading the following text: "${textToAnalyze}".
           Analyze the user's pronunciation from the audio.
           For any mispronounced words (marked as "needs_improvement" or "incorrect"), you MUST provide specific advice on articulation in the 'tongue_placement' field.
           Explain clearly how to position the tongue, lips, and jaw to produce the correct sound.
@@ -620,10 +642,13 @@ export default function StreamingConsole() {
           if (response.text) {
               const feedback = JSON.parse(response.text) as PronunciationFeedback;
               setPracticeFeedback(feedback);
+              setAnalyzedText(textToAnalyze);
           }
 
       } catch (e) {
           handleOpError(e);
+      } finally {
+        setIsAnalyzing(false);
       }
   };
 
@@ -639,6 +664,11 @@ export default function StreamingConsole() {
       } else {
           // Start
           setPracticeFeedback(null);
+          
+          // Determine what text we are reading: Selection or Full Text
+          const textToRead = currentSelection.trim().length > 0 ? currentSelection : targetText;
+          activeAnalysisTextRef.current = textToRead;
+
           practiceAudioChunks.current = [];
           const onData = (base64: string) => {
               practiceAudioChunks.current.push(base64);
@@ -652,6 +682,8 @@ export default function StreamingConsole() {
   const handleClearPractice = () => {
     setTargetText("");
     setManualTopic("");
+    setCurrentSelection("");
+    setAnalyzedText("");
     setPracticeFeedback(null);
     setPracticeError(null);
     
@@ -664,6 +696,7 @@ export default function StreamingConsole() {
     }
     practiceAudioBufferRef.current = null;
     setIsPracticePlaying(false);
+    setIsTTSProcessing(false);
     isPausedIntentRef.current = false;
     practicePausedAtRef.current = 0;
 
@@ -758,8 +791,20 @@ export default function StreamingConsole() {
       };
   }, [targetText, ai, debouncedFetchIPA]);
 
+  const handleSelectionChange = (e: React.SyntheticEvent<HTMLTextAreaElement>) => {
+      const target = e.currentTarget;
+      const text = target.value.substring(target.selectionStart, target.selectionEnd);
+      setCurrentSelection(text);
+  };
+
+  const handleTextareaKeyUp = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    handleSelectionChange(e);
+  };
 
   const handleTextareaMouseUp = async (e: React.MouseEvent<HTMLTextAreaElement>) => {
+    // Track selection
+    handleSelectionChange(e);
+
     const textarea = e.currentTarget;
     const start = textarea.selectionStart;
     const end = textarea.selectionEnd;
@@ -959,8 +1004,15 @@ export default function StreamingConsole() {
          {isCaching && (
              <div className="practice-status">Caching pronunciation...</div>
          )}
+         {isAnalyzing && (
+             <div className="practice-status analyzing">Analyzing speech...</div>
+         )}
+         {isTTSProcessing && (
+             <div className="practice-status">Generating audio...</div>
+         )}
          <div className="practice-input-container">
             <textarea 
+                ref={textareaRef}
                 className="practice-textarea" 
                 value={targetText}
                 onChange={(e) => setTargetText(e.target.value)}
@@ -968,6 +1020,7 @@ export default function StreamingConsole() {
                 rows={5}
                 onMouseUp={handleTextareaMouseUp}
                 onMouseDown={handleTextareaMouseDown}
+                onKeyUp={handleTextareaKeyUp}
             />
          </div>
          
@@ -975,9 +1028,13 @@ export default function StreamingConsole() {
             <button 
                 className="practice-button" 
                 onClick={handlePracticeTTS}
-                disabled={!targetText}
+                disabled={!targetText || isTTSProcessing}
             >
-                {isPracticePlaying ? (
+                {isTTSProcessing ? (
+                    <>
+                    <span className="icon">hourglass_empty</span> Processing...
+                    </>
+                ) : isPracticePlaying ? (
                     <>
                     <span className="icon">pause</span> Pause
                     </>
@@ -991,10 +1048,10 @@ export default function StreamingConsole() {
             <button
                 className={cn("practice-button mic-toggle", { active: isPracticeRecording })}
                 onClick={handlePracticeMicToggle}
-                disabled={!targetText}
+                disabled={!targetText || isAnalyzing}
             >
                 <span className="icon">mic</span>
-                {isPracticeRecording ? "Stop & Check" : "Read Aloud"}
+                {isPracticeRecording ? "Stop & Check" : (currentSelection.trim().length > 0 ? "Read Selection" : "Read Aloud")}
             </button>
             
             <button 
@@ -1018,7 +1075,7 @@ export default function StreamingConsole() {
                      <strong>Overall:</strong> {practiceFeedback.overall_assessment}
                  </div>
                  <div className="pronunciation-text">
-                     {renderFeedbackText(targetText, practiceFeedback.words)}
+                     {renderFeedbackText(analyzedText, practiceFeedback.words)}
                  </div>
              </div>
          )}

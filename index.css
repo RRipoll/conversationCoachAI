@@ -13,6 +13,8 @@
 
 
 
+
+
 body {
   margin: 0;
   font-family:
@@ -1580,6 +1582,10 @@ form button:first-of-type {
   margin-top: -8px;
   margin-bottom: 8px;
   padding-left: 4px;
+}
+
+.practice-status.analyzing {
+  color: var(--Red-500);
 }
 
 .feedback-tooltip {
