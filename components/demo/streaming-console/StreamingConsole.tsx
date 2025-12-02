@@ -123,7 +123,13 @@ export default function StreamingConsole() {
   const [showGuide, setShowGuide] = useState(false); // State for Pronunciation Guide
   const targetTextRef = useRef(targetText);
   const activeAnalysisTextRef = useRef(""); // Stores the text (full or selection) being analyzed during recording
+  
+  // Audio Refs for Pause/Resume
   const practiceSourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const practiceAudioBufferRef = useRef<AudioBuffer | null>(null);
+  const practiceStartTimeRef = useRef<number>(0);
+  const practicePausedAtRef = useRef<number>(0);
+  
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   
   // Practice Recorder State
@@ -150,12 +156,6 @@ export default function StreamingConsole() {
     y: number;
     data: any;
   } | null>(null);
-  
-  // Refs for TTS Pause/Resume
-  const practiceAudioBufferRef = useRef<AudioBuffer | null>(null);
-  const practiceStartTimeRef = useRef<number>(0);
-  const practicePausedAtRef = useRef<number>(0);
-  const isPausedIntentRef = useRef<boolean>(false);
 
   const adjustTextareaHeight = useCallback(() => {
     if (textareaRef.current) {
@@ -176,21 +176,16 @@ export default function StreamingConsole() {
     setPracticeFeedback(null); // Clear feedback when text changes
     setCurrentSelection(""); // Clear selection state when text changes
     
-    // Reset audio buffer and state if text changes
-    if (practiceAudioBufferRef.current) {
-      if (isPracticePlaying && practiceSourceRef.current) {
-        isPausedIntentRef.current = false; // Treat as full stop
-        try {
-          practiceSourceRef.current.stop();
-        } catch (e) {
-          // ignore
-        }
-      }
-      practiceAudioBufferRef.current = null;
-      practicePausedAtRef.current = 0;
-      setIsPracticePlaying(false);
-      setIsTTSProcessing(false);
+    // Stop any playing audio if text changes
+    if (practiceSourceRef.current) {
+        practiceSourceRef.current.stop();
+        practiceSourceRef.current = null;
     }
+    // Clear audio buffer cache
+    practiceAudioBufferRef.current = null;
+    practicePausedAtRef.current = 0;
+    setIsPracticePlaying(false);
+    setIsTTSProcessing(false);
 
     // Auto-resize textarea to fit content
     adjustTextareaHeight();
@@ -537,78 +532,92 @@ export default function StreamingConsole() {
     const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({sampleRate: 24000});
 
     // 1. Pause Logic
-    if (isPracticePlaying && practiceSourceRef.current) {
-        // We are playing, so we pause.
-        isPausedIntentRef.current = true;
-        practicePausedAtRef.current += audioContext.currentTime - practiceStartTimeRef.current;
-        practiceSourceRef.current.stop();
-        practiceSourceRef.current = null;
+    if (isPracticePlaying) {
+        if (practiceSourceRef.current) {
+            practiceSourceRef.current.stop();
+            practiceSourceRef.current = null;
+        }
+        // Record where we paused
+        practicePausedAtRef.current = audioContext.currentTime - practiceStartTimeRef.current;
         setIsPracticePlaying(false);
+        setIsTTSProcessing(false);
         return;
     }
 
-    // 2. Resume or Start Logic
+    // 2. Resume Logic (if audio is buffered and we have a pause position)
+    if (practiceAudioBufferRef.current && practicePausedAtRef.current > 0 && practicePausedAtRef.current < practiceAudioBufferRef.current.duration) {
+        const source = audioContext.createBufferSource();
+        source.buffer = practiceAudioBufferRef.current;
+        source.connect(audioContext.destination);
+        source.onended = () => {
+             // We don't necessarily clear playing state here if we want to allow re-play or other logic,
+             // but typically we should. However, since manual pause triggers onended too (sometimes),
+             // we rely on the click handler to toggle state.
+             // For natural end:
+             if (audioContext.currentTime >= practiceStartTimeRef.current + (practiceAudioBufferRef.current?.duration || 0) - 0.1) {
+                setIsPracticePlaying(false);
+                practicePausedAtRef.current = 0;
+             }
+        };
+        
+        practiceSourceRef.current = source;
+        // Adjust start time ref so that currentTime - startTime = correct playback position
+        practiceStartTimeRef.current = audioContext.currentTime - practicePausedAtRef.current;
+        
+        source.start(0, practicePausedAtRef.current);
+        setIsPracticePlaying(true);
+        return;
+    }
 
+    // 3. New Start Logic
     try {
-        let bufferToPlay = practiceAudioBufferRef.current;
+        setIsTTSProcessing(true);
+        // Reset offsets
+        practicePausedAtRef.current = 0;
+        practiceStartTimeRef.current = 0;
 
-        // If no buffer cached, fetch it
-        if (!bufferToPlay) {
-            setIsTTSProcessing(true);
-            const response = await ai.models.generateContent({
-                model: 'gemini-2.5-flash-preview-tts',
-                contents: [{ parts: [{ text: targetText }] }],
-                config: {
-                    responseModalities: [Modality.AUDIO],
-                    speechConfig: {
-                        voiceConfig: {
-                            prebuiltVoiceConfig: { voiceName: 'Kore' },
-                        },
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash-preview-tts',
+            contents: [{ parts: [{ text: targetText }] }],
+            config: {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: {
+                    voiceConfig: {
+                        prebuiltVoiceConfig: { voiceName: 'Kore' },
                     },
                 },
-            });
+            },
+        });
 
-            const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-            if (!base64Audio) throw new Error("No audio generated");
-
-            bufferToPlay = await decodeAudioData(
+        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        if (base64Audio) {
+            const buffer = await decodeAudioData(
                 base64ToArrayBuffer(base64Audio),
                 audioContext,
                 24000,
                 1
             );
-            practiceAudioBufferRef.current = bufferToPlay;
-            setIsTTSProcessing(false);
+            practiceAudioBufferRef.current = buffer;
+
+            const source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioContext.destination);
+            source.onended = () => {
+                if (audioContext.currentTime >= practiceStartTimeRef.current + buffer.duration - 0.1) {
+                     setIsPracticePlaying(false);
+                     practicePausedAtRef.current = 0;
+                }
+            };
+
+            practiceSourceRef.current = source;
+            practiceStartTimeRef.current = audioContext.currentTime;
+            source.start();
+            setIsPracticePlaying(true);
         }
-
-        setIsPracticePlaying(true);
-
-        // Play the buffer
-        const source = audioContext.createBufferSource();
-        source.buffer = bufferToPlay;
-        source.connect(audioContext.destination);
-        
-        // Handle cleanup on end
-        source.onended = () => {
-             // Only reset if we finished naturally, not if we paused intentionally
-             if (!isPausedIntentRef.current) {
-                setIsPracticePlaying(false);
-                practicePausedAtRef.current = 0; // Reset progress
-                // Keep buffer for replay
-             }
-        };
-        practiceSourceRef.current = source;
-        
-        // Start from paused position or 0
-        const startOffset = practicePausedAtRef.current % bufferToPlay.duration;
-        practiceStartTimeRef.current = audioContext.currentTime - startOffset;
-        
-        source.start(0, startOffset);
-        isPausedIntentRef.current = false; // Reset intent
-
     } catch (e) {
         handleOpError(e);
         setIsPracticePlaying(false);
+    } finally {
         setIsTTSProcessing(false);
     }
   };
@@ -729,16 +738,13 @@ export default function StreamingConsole() {
     
     // Stop Playback
     if (practiceSourceRef.current) {
-        try {
-            practiceSourceRef.current.stop();
-        } catch(e) {}
+        practiceSourceRef.current.stop();
         practiceSourceRef.current = null;
     }
     practiceAudioBufferRef.current = null;
+    practicePausedAtRef.current = 0;
     setIsPracticePlaying(false);
     setIsTTSProcessing(false);
-    isPausedIntentRef.current = false;
-    practicePausedAtRef.current = 0;
 
     // Stop Recording
     if (isPracticeRecording) {
