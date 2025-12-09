@@ -130,7 +130,8 @@ export default function StreamingConsole() {
   const practiceAudioBufferRef = useRef<AudioBuffer | null>(null);
   const practiceStartTimeRef = useRef<number>(0);
   const practicePausedAtRef = useRef<number>(0);
-  
+  const practiceAudioTextRef = useRef<string | null>(null); // Tracks the text currently buffered/playing
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   
   // Practice Recorder State
@@ -185,6 +186,7 @@ export default function StreamingConsole() {
     // Clear audio buffer cache
     practiceAudioBufferRef.current = null;
     practicePausedAtRef.current = 0;
+    practiceAudioTextRef.current = null;
     setIsPracticePlaying(false);
     setIsTTSProcessing(false);
 
@@ -527,7 +529,10 @@ export default function StreamingConsole() {
   };
 
   const handlePracticeTTS = async () => {
-    if (!ai || !targetText) return;
+    // Determine the text to read: either the selection or the full text.
+    const textToSpeak = currentSelection.trim() || targetText;
+    
+    if (!ai || !textToSpeak) return;
     setPracticeError(null);
 
     // Reuse or create AudioContext to ensure time continuity for pause/resume
@@ -541,6 +546,9 @@ export default function StreamingConsole() {
         await audioContext.resume();
     }
 
+    // Check if the user has changed the text context (e.g. selected a new part)
+    const isNewText = practiceAudioTextRef.current !== textToSpeak;
+
     // 1. Pause Logic
     if (isPracticePlaying) {
         if (practiceSourceRef.current) {
@@ -551,11 +559,24 @@ export default function StreamingConsole() {
             }
             practiceSourceRef.current = null;
         }
-        // Record where we paused relative to the start time of this playback session
-        practicePausedAtRef.current = audioContext.currentTime - practiceStartTimeRef.current;
         setIsPracticePlaying(false);
         setIsTTSProcessing(false);
-        return;
+
+        // If switching text, we don't save the pause state for resumption, we reset.
+        if (isNewText) {
+             practicePausedAtRef.current = 0;
+        } else {
+             // Record where we paused relative to the start time of this playback session
+             practicePausedAtRef.current = audioContext.currentTime - practiceStartTimeRef.current;
+             return;
+        }
+    }
+
+    // If context changed, reset buffer to force new generation
+    if (isNewText) {
+        practiceAudioBufferRef.current = null;
+        practicePausedAtRef.current = 0;
+        practiceAudioTextRef.current = null;
     }
 
     // 2. Resume Logic (if audio is buffered and we have a pause position)
@@ -564,9 +585,6 @@ export default function StreamingConsole() {
         source.buffer = practiceAudioBufferRef.current;
         source.connect(audioContext.destination);
         source.onended = () => {
-             // We don't necessarily clear playing state here if we want to allow re-play or other logic,
-             // but typically we should. However, since manual pause triggers onended too (sometimes),
-             // we rely on the click handler to toggle state.
              // For natural end:
              if (audioContext.currentTime >= practiceStartTimeRef.current + (practiceAudioBufferRef.current?.duration || 0) - 0.2) {
                 setIsPracticePlaying(false);
@@ -576,7 +594,6 @@ export default function StreamingConsole() {
         
         practiceSourceRef.current = source;
         // Recalculate startTime so that (currentTime - startTime) equals the pausedAt point
-        // startTime = currentTime - pausedAt
         practiceStartTimeRef.current = audioContext.currentTime - practicePausedAtRef.current;
         
         source.start(0, practicePausedAtRef.current);
@@ -592,7 +609,7 @@ export default function StreamingConsole() {
         
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash-preview-tts',
-            contents: [{ parts: [{ text: targetText }] }],
+            contents: [{ parts: [{ text: textToSpeak }] }],
             config: {
                 responseModalities: [Modality.AUDIO],
                 speechConfig: {
@@ -612,6 +629,7 @@ export default function StreamingConsole() {
                 1
             );
             practiceAudioBufferRef.current = buffer;
+            practiceAudioTextRef.current = textToSpeak; // Track what we are playing
 
             const source = audioContext.createBufferSource();
             source.buffer = buffer;
@@ -762,6 +780,7 @@ export default function StreamingConsole() {
     }
     practiceAudioBufferRef.current = null;
     practicePausedAtRef.current = 0;
+    practiceAudioTextRef.current = null;
     setIsPracticePlaying(false);
     setIsTTSProcessing(false);
 
