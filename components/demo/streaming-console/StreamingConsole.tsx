@@ -125,6 +125,7 @@ export default function StreamingConsole() {
   const activeAnalysisTextRef = useRef(""); // Stores the text (full or selection) being analyzed during recording
   
   // Audio Refs for Pause/Resume
+  const ttsAudioContextRef = useRef<AudioContext | null>(null);
   const practiceSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const practiceAudioBufferRef = useRef<AudioBuffer | null>(null);
   const practiceStartTimeRef = useRef<number>(0);
@@ -529,15 +530,28 @@ export default function StreamingConsole() {
     if (!ai || !targetText) return;
     setPracticeError(null);
 
-    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({sampleRate: 24000});
+    // Reuse or create AudioContext to ensure time continuity for pause/resume
+    if (!ttsAudioContextRef.current || ttsAudioContextRef.current.state === 'closed') {
+        ttsAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({sampleRate: 24000});
+    }
+    const audioContext = ttsAudioContextRef.current;
+    
+    // Resume context if suspended (browser autoplay policy)
+    if (audioContext.state === 'suspended') {
+        await audioContext.resume();
+    }
 
     // 1. Pause Logic
     if (isPracticePlaying) {
         if (practiceSourceRef.current) {
-            practiceSourceRef.current.stop();
+            try {
+                practiceSourceRef.current.stop();
+            } catch (e) {
+                // ignore if already stopped
+            }
             practiceSourceRef.current = null;
         }
-        // Record where we paused
+        // Record where we paused relative to the start time of this playback session
         practicePausedAtRef.current = audioContext.currentTime - practiceStartTimeRef.current;
         setIsPracticePlaying(false);
         setIsTTSProcessing(false);
@@ -554,14 +568,15 @@ export default function StreamingConsole() {
              // but typically we should. However, since manual pause triggers onended too (sometimes),
              // we rely on the click handler to toggle state.
              // For natural end:
-             if (audioContext.currentTime >= practiceStartTimeRef.current + (practiceAudioBufferRef.current?.duration || 0) - 0.1) {
+             if (audioContext.currentTime >= practiceStartTimeRef.current + (practiceAudioBufferRef.current?.duration || 0) - 0.2) {
                 setIsPracticePlaying(false);
                 practicePausedAtRef.current = 0;
              }
         };
         
         practiceSourceRef.current = source;
-        // Adjust start time ref so that currentTime - startTime = correct playback position
+        // Recalculate startTime so that (currentTime - startTime) equals the pausedAt point
+        // startTime = currentTime - pausedAt
         practiceStartTimeRef.current = audioContext.currentTime - practicePausedAtRef.current;
         
         source.start(0, practicePausedAtRef.current);
@@ -574,8 +589,7 @@ export default function StreamingConsole() {
         setIsTTSProcessing(true);
         // Reset offsets
         practicePausedAtRef.current = 0;
-        practiceStartTimeRef.current = 0;
-
+        
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash-preview-tts',
             contents: [{ parts: [{ text: targetText }] }],
@@ -602,15 +616,18 @@ export default function StreamingConsole() {
             const source = audioContext.createBufferSource();
             source.buffer = buffer;
             source.connect(audioContext.destination);
+            
+            // Set start time relative to current context time
+            practiceStartTimeRef.current = audioContext.currentTime;
+
             source.onended = () => {
-                if (audioContext.currentTime >= practiceStartTimeRef.current + buffer.duration - 0.1) {
+                if (audioContext.currentTime >= practiceStartTimeRef.current + buffer.duration - 0.2) {
                      setIsPracticePlaying(false);
                      practicePausedAtRef.current = 0;
                 }
             };
 
             practiceSourceRef.current = source;
-            practiceStartTimeRef.current = audioContext.currentTime;
             source.start();
             setIsPracticePlaying(true);
         }
@@ -738,7 +755,9 @@ export default function StreamingConsole() {
     
     // Stop Playback
     if (practiceSourceRef.current) {
-        practiceSourceRef.current.stop();
+        try {
+            practiceSourceRef.current.stop();
+        } catch(e) {}
         practiceSourceRef.current = null;
     }
     practiceAudioBufferRef.current = null;
@@ -894,9 +913,13 @@ export default function StreamingConsole() {
             const word = selectedText.toLowerCase().replace(/[^\w']/g, "");
             
             // 1. Position Tooltip
-            // Calculate approximate coordinates based on selection is hard in textarea.
-            // Simplified: show near mouse pointer
-            const x = e.clientX;
+            const windowWidth = window.innerWidth;
+            let x = e.clientX;
+            // Clamp X to prevent overflow for the selection tooltip
+            // Assuming tooltip width is variable but around 200px max, and it's centered
+            if (x < 50) x = 50;
+            if (x > windowWidth - 50) x = windowWidth - 50;
+
             const y = e.clientY;
 
             // 2. Check Cache
@@ -1007,8 +1030,25 @@ export default function StreamingConsole() {
   };
 
   const handleFeedbackEnter = (e: React.MouseEvent, data: any) => {
+      // Tooltip width is ~350px.
+      const tooltipWidth = 350; 
+      const padding = 10;
+      const windowWidth = window.innerWidth;
+      
+      let x = e.clientX;
+      
+      // If tooltip would go off right edge
+      if (x + tooltipWidth > windowWidth) {
+         x = windowWidth - tooltipWidth - padding;
+      }
+      
+      // If pushed too far left (small screen)
+      if (x < padding) {
+         x = padding;
+      }
+
       setFeedbackTooltip({
-          x: e.clientX,
+          x: x,
           y: e.clientY,
           data: data
       });

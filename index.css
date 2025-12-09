@@ -21,6 +21,8 @@
 
 
 
+
+
 body {
   margin: 0;
   font-family:
@@ -1579,6 +1581,8 @@ form button:first-of-type {
     box-shadow: 0 4px 12px rgba(0,0,0,0.3);
     z-index: 1000;
     pointer-events: none;
+    max-width: 90vw;
+    width: max-content;
 }
 
 .tooltip-word {
@@ -1643,6 +1647,7 @@ form button:first-of-type {
     box-shadow: 0 8px 24px rgba(0,0,0,0.5);
     z-index: 2000;
     width: 350px;
+    max-width: 90vw;
     pointer-events: none;
     transform: translateY(10px);
 }
